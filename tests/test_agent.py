@@ -1,69 +1,125 @@
 from unittest.mock import MagicMock, patch
 
-from bot.agent import MAX_TOOL_CALL_ROUNDS, SYSTEM_INSTRUCTION, AgentReply, HermesAgent
+from bot.agent import SYSTEM_INSTRUCTION, HermesAgent, _is_retryable_gemini_error
 
 
 def test_system_instruction_enforces_house_style():
-    """The personality prompt must include Pravy's phrasing + disclaimer."""
     assert "According to Pravy's CAN SLIM philosophy" in SYSTEM_INSTRUCTION
     assert "Educational signals, not investment advice" in SYSTEM_INSTRUCTION
-    assert "7–8%" in SYSTEM_INSTRUCTION  # stop-loss rule
-    assert "20–25%" in SYSTEM_INSTRUCTION  # profit-take rule
+    assert "7–8%" in SYSTEM_INSTRUCTION
+    assert "20–25%" in SYSTEM_INSTRUCTION
+    assert "Google Search" in SYSTEM_INSTRUCTION
 
 
-def test_agent_returns_text_on_success():
-    fake_response = MagicMock()
-    fake_response.text = "According to Pravy's CAN SLIM philosophy, RELIANCE qualifies…"
-    fake_response.automatic_function_calling_history = [MagicMock(), MagicMock()]
+def test_is_retryable_gemini_error_detects_503():
+    assert _is_retryable_gemini_error(RuntimeError("503 UNAVAILABLE demand spike"))
+    assert _is_retryable_gemini_error(RuntimeError("Model overloaded: 503"))
 
+
+def test_is_retryable_gemini_error_detects_timeout():
+    assert _is_retryable_gemini_error(TimeoutError("request timed out"))
+
+
+def test_is_retryable_gemini_error_rejects_auth():
+    assert not _is_retryable_gemini_error(RuntimeError("401 Unauthorized"))
+
+
+def _fake_chunk(text: str) -> MagicMock:
+    c = MagicMock()
+    c.text = text
+    return c
+
+
+def test_stream_reply_yields_gemini_chunks():
     fake_client = MagicMock()
-    fake_client.models.generate_content.return_value = fake_response
-
+    fake_client.models.generate_content_stream.return_value = iter(
+        [_fake_chunk("Hello "), _fake_chunk("world!")]
+    )
     with patch("bot.agent.genai.Client", return_value=fake_client):
         agent = HermesAgent(api_key="test")
-        reply = agent.reply("what should I invest in?")
-
-    assert isinstance(reply, AgentReply)
-    assert "Pravy's CAN SLIM philosophy" in reply.text
-    assert reply.tool_calls_made == 2
+        pieces = list(agent.stream_reply("hi"))
+    assert pieces == ["Hello ", "world!"]
 
 
-def test_agent_falls_back_on_exception():
+def test_stream_reply_filters_empty_chunks():
     fake_client = MagicMock()
-    fake_client.models.generate_content.side_effect = RuntimeError("gemini blew up")
-
+    fake_client.models.generate_content_stream.return_value = iter(
+        [_fake_chunk(""), _fake_chunk("A"), _fake_chunk(""), _fake_chunk("B")]
+    )
     with patch("bot.agent.genai.Client", return_value=fake_client):
         agent = HermesAgent(api_key="test")
-        reply = agent.reply("what's up?")
-
-    assert "snag" in reply.text.lower()
-    assert reply.tool_calls_made == 0
+        pieces = list(agent.stream_reply("hi"))
+    assert pieces == ["A", "B"]
 
 
-def test_agent_fills_in_placeholder_when_empty():
-    fake_response = MagicMock()
-    fake_response.text = ""
-    fake_response.automatic_function_calling_history = []
+def test_stream_reply_fallback_on_exception():
     fake_client = MagicMock()
-    fake_client.models.generate_content.return_value = fake_response
+    fake_client.models.generate_content_stream.side_effect = RuntimeError("401 forbidden")
     with patch("bot.agent.genai.Client", return_value=fake_client):
         agent = HermesAgent(api_key="test")
-        reply = agent.reply("hi")
-    assert reply.text  # not empty
-    assert reply.text != ""
+        pieces = list(agent.stream_reply("hi"))
+    assert pieces
+    assert "snag" in pieces[-1].lower()
 
 
-def test_agent_passes_tools_and_system_instruction():
-    fake_response = MagicMock()
-    fake_response.text = "ok"
-    fake_response.automatic_function_calling_history = []
+def test_stream_reply_retries_503_then_succeeds(monkeypatch):
+    attempts = {"n": 0}
+
+    def flaky_stream(*args, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("503 UNAVAILABLE model overloaded")
+        return iter([_fake_chunk("final answer")])
+
     fake_client = MagicMock()
-    fake_client.models.generate_content.return_value = fake_response
+    fake_client.models.generate_content_stream.side_effect = flaky_stream
+    monkeypatch.setattr("bot.agent.time.sleep", lambda _s: None)
     with patch("bot.agent.genai.Client", return_value=fake_client):
         agent = HermesAgent(api_key="test")
-        agent.reply("hello")
-    call_args = fake_client.models.generate_content.call_args
-    config = call_args.kwargs["config"]
-    assert config.system_instruction == SYSTEM_INSTRUCTION
-    assert config.tools  # tools list populated
-    assert config.automatic_function_calling.maximum_remote_calls == MAX_TOOL_CALL_ROUNDS
+        pieces = list(agent.stream_reply("hi"))
+    assert pieces == ["final answer"]
+    assert attempts["n"] == 2
+
+
+def test_stream_reply_empty_response_returns_clarification():
+    fake_client = MagicMock()
+    fake_client.models.generate_content_stream.return_value = iter([])
+    with patch("bot.agent.genai.Client", return_value=fake_client):
+        agent = HermesAgent(api_key="test")
+        pieces = list(agent.stream_reply("hi"))
+    assert pieces and "rephrase" in pieces[0].lower()
+
+
+def test_ensure_playbook_uploads_once(tmp_path):
+    pdf = tmp_path / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+
+    fake_client = MagicMock()
+    handle = MagicMock()
+    fake_client.files.upload.return_value = handle
+
+    with patch("bot.agent.genai.Client", return_value=fake_client):
+        agent = HermesAgent(api_key="test", playbook_path=pdf)
+        first = agent._ensure_playbook()  # noqa: SLF001
+        second = agent._ensure_playbook()  # noqa: SLF001
+    assert first is handle
+    assert second is handle
+    fake_client.files.upload.assert_called_once()
+
+
+def test_ensure_playbook_without_path_returns_none():
+    fake_client = MagicMock()
+    with patch("bot.agent.genai.Client", return_value=fake_client):
+        agent = HermesAgent(api_key="test")
+        assert agent._ensure_playbook() is None  # noqa: SLF001
+    fake_client.files.upload.assert_not_called()
+
+
+def test_ensure_playbook_upload_failure_degrades_gracefully(tmp_path):
+    pdf = tmp_path / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    fake_client = MagicMock()
+    fake_client.files.upload.side_effect = RuntimeError("boom")
+    with patch("bot.agent.genai.Client", return_value=fake_client):
+        agent = HermesAgent(api_key="test", playbook_path=pdf)
+        assert agent._ensure_playbook() is None  # noqa: SLF001

@@ -51,6 +51,22 @@ class TelegramClient:
             data["parse_mode"] = parse_mode
         return self._call("sendMessage", data=data)
 
+    def send_chat_action(self, action: str = "typing") -> None:
+        """Send a non-blocking chat action (``typing``, ``upload_document``).
+
+        Telegram auto-expires the action after ~5 s, so this must be refreshed
+        for long-running operations. Silently swallows transport errors — a
+        missing typing indicator should never break the actual reply flow.
+        """
+        try:
+            self._client.post(
+                f"{self.base}/sendChatAction",
+                data={"chat_id": self.chat_id, "action": action},
+                timeout=5.0,
+            )
+        except httpx.HTTPError as exc:
+            logger.info("sendChatAction %s failed (non-fatal): %s", action, exc)
+
     def send_document(
         self,
         *,

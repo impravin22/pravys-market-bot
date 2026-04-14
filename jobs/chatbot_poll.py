@@ -1,30 +1,16 @@
-"""GH Actions entry point: poll Telegram, dispatch to the Hermes agent.
+"""GH Actions entry point: poll Telegram, stream a Gemini reply back in-chat.
 
-Runs every 5 min via cron. Each run:
+Each cron tick:
 
-1. Loads persisted state from ``state/chatbot_state.json`` (on the
-   ``chatbot-state`` branch — checkout managed by the workflow).
-2. Calls ``getUpdates`` with the saved offset; Telegram returns every
-   message since the previous ack.
-3. For each eligible update (direct mention, DM, reply-to-bot, or
-   ``/`` command), consults the in-process rate limiter, then passes the
-   text to ``HermesAgent.reply()``.
-4. Sends the agent's reply back via Telegram ``sendMessage`` as plain
-   text (no HTML parsing — Gemini output is free-form and would otherwise
-   trigger 400s or permit injection).
-5. Saves the new offset to the state file. The workflow commits it to
-   ``chatbot-state``. The rate-limit map is **not** persisted — it stays
-   in-process only so Telegram user_ids never hit a public git branch.
+1. Load persisted offset from ``state/chatbot_state.json``.
+2. ``getUpdates`` for anything since the previous ack.
+3. For each eligible message (authorised chat, non-bot, non-empty text,
+   inside length cap, not rate-limited), send a placeholder reply, then
+   stream Gemini chunks into it via ``editMessageText``.
+4. Persist the new offset.
 
-Design choices:
-- Only respond in authorised chats (the configured group chat, or a DM
-  from the owner when ``TELEGRAM_OWNER_USER_ID`` is set) — prevents a
-  random stranger from burning the Gemini budget.
-- Hard cap on input length; Gemini spend is bounded.
-- Ignore bot messages, edits, and non-text updates.
-- Best-effort: a failure on one message never blocks later ones, but we
-  un-mark the rate-limit entry if the reply send fails so the user isn't
-  blocked from retrying.
+State design intentionally omits user_ids — the ``chatbot-state`` branch
+stays PII-free.
 """
 
 from __future__ import annotations
@@ -38,6 +24,7 @@ import httpx
 
 from bot.agent import HermesAgent
 from bot.state import RateLimiter, load_state, save_state
+from bot.streaming import TelegramStream
 from core.config import load_config
 from core.telegram_client import TelegramClient
 
@@ -47,6 +34,7 @@ logger = logging.getLogger("chatbot_poll")
 GET_UPDATES_TIMEOUT = 10.0
 MAX_INPUT_CHARS = 1000
 STATE_PATH = Path(os.getenv("CHATBOT_STATE_PATH", "state/chatbot_state.json"))
+PLAYBOOK_PATH = Path(os.getenv("CANSLIM_PLAYBOOK_PATH", "TheCAN-SLIM®-Playbook.pdf"))
 
 
 def _call_get_updates(bot_token: str, offset: int) -> list[dict]:
@@ -74,12 +62,6 @@ def _is_authorised_chat(
     *,
     owner_user_id: str | None = None,
 ) -> bool:
-    """Allow the configured group AND a direct DM from the owner.
-
-    For private 1:1 chats Telegram uses chat_id == user_id, so setting
-    ``TELEGRAM_OWNER_USER_ID`` to the owner's user_id enables DM replies.
-    Without it, only the configured group chat is authorised.
-    """
     target = str(chat_id)
     if target == str(owner_chat_id):
         return True
@@ -87,35 +69,19 @@ def _is_authorised_chat(
 
 
 def _extract_text(message: dict, bot_username: str | None) -> str | None:
-    """Pull the user text, stripping only the ``@bot`` suffix.
-
-    Handles three common Telegram patterns without losing the user's
-    intent:
-
-    - ``@pravys_market_bot what should I buy?`` — leading mention stripped
-      via the Telegram ``entities`` offset, leaving ``what should I buy?``.
-    - ``/today@pravys_market_bot RELIANCE`` — only the ``@bot`` suffix is
-      trimmed from the command token; the ``/today`` verb is preserved so
-      the agent sees ``/today RELIANCE``.
-    - Plain DM text — returned verbatim.
-    """
     text = (message.get("text") or "").strip()
     if not text:
         return None
-
     entities = message.get("entities") or []
     for ent in entities:
         if ent.get("type") == "mention" and ent.get("offset") == 0:
             length = int(ent.get("length", 0))
             text = text[length:].strip()
             break
-
-    # Strip only the `@bot` suffix from a slash command; keep the verb.
     if bot_username and text.startswith("/"):
         head, sep, rest = text.partition(" ")
         stripped_head = head.removesuffix(f"@{bot_username}")
         text = f"{stripped_head}{sep}{rest}".strip()
-
     return text or None
 
 
@@ -138,17 +104,12 @@ def _bot_username(bot_token: str) -> str | None:
 
 
 def _send_plain(telegram: TelegramClient, chat_id: int | str, text: str) -> None:
-    """Send a reply to ``chat_id`` with ``parse_mode=None``.
-
-    The Gemini output is free-form prose; HTML parsing would trip on stray
-    ``<`` characters in tickers or news snippets and reject the whole send.
-    """
-    per_chat_client = TelegramClient(
+    per_chat = TelegramClient(
         telegram.bot_token,
         str(chat_id),
         client=telegram._client,  # noqa: SLF001 — reuse the httpx transport
     )
-    per_chat_client.send_message(text, parse_mode=None)
+    per_chat.send_message(text, parse_mode=None)
 
 
 def _handle_one(
@@ -190,13 +151,16 @@ def _handle_one(
         return
     rate_limiter.mark(user_id)
 
-    logger.info("dispatching to agent: user_id=%s text=%r", user_id, text[:80])
+    logger.info("streaming reply to user_id=%s text=%r", user_id, text[:80])
+    stream = TelegramStream(
+        bot_token=telegram.bot_token,
+        chat_id=chat_id,
+        http_client=telegram._client,  # noqa: SLF001
+    )
     try:
-        reply = agent.reply(text)
-        _send_plain(telegram, chat_id, reply.text)
+        final = stream.stream(agent.stream_reply(text))
+        logger.info("reply-sent chars=%d", len(final))
     except Exception:
-        # Reply never reached the user — release the rate-limit slot so they
-        # aren't locked out for 30 s from a message they never saw answered.
         rate_limiter.unmark(user_id)
         raise
 
@@ -213,7 +177,11 @@ def main() -> int:
         save_state(state, STATE_PATH)
         return 0
 
-    agent = HermesAgent(api_key=config.google.api_key, model=config.google.model)
+    agent = HermesAgent(
+        api_key=config.google.api_key,
+        model=config.google.model,
+        playbook_path=PLAYBOOK_PATH if PLAYBOOK_PATH.exists() else None,
+    )
     telegram = TelegramClient(config.telegram.bot_token, config.telegram.chat_id)
     owner_user_id = os.getenv("TELEGRAM_OWNER_USER_ID")
     rate_limiter = RateLimiter()

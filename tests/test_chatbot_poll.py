@@ -48,25 +48,21 @@ def test_extract_text_preserves_plain_dm():
 
 
 def test_extract_text_slash_command_keeps_verb_in_group():
-    """/today@bot RELIANCE must become '/today RELIANCE' — don't drop the verb."""
     msg = {"text": "/today@pravys_market_bot RELIANCE"}
     assert _extract_text(msg, "pravys_market_bot") == "/today RELIANCE"
 
 
 def test_extract_text_bare_slash_command_in_group_keeps_verb():
-    """'/start@bot' alone must surface as '/start' so greetings still work."""
     msg = {"text": "/start@pravys_market_bot"}
     assert _extract_text(msg, "pravys_market_bot") == "/start"
 
 
 def test_extract_text_slash_command_in_dm_unchanged():
-    """Without @bot suffix (typical DM), leave /start intact for the agent."""
     msg = {"text": "/start"}
     assert _extract_text(msg, "pravys_market_bot") == "/start"
 
 
 def test_extract_text_mention_mid_sentence_preserved():
-    """A mid-text mention must NOT be stripped — the whole sentence is the intent."""
     msg = {
         "text": "hey look at @pravys_market_bot here",
         "entities": [{"type": "mention", "offset": 12, "length": 19}],
@@ -94,94 +90,110 @@ def _make_update(text: str, *, chat_id: int = -100500, user_id: int = 42) -> dic
     }
 
 
-def _make_mocks(monkeypatch):
+class _FakeStream:
+    instances: list["_FakeStream"] = []
+
+    def __init__(self, *, bot_token: str, chat_id, http_client):
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.chunks_seen: list[str] = []
+        type(self).instances.append(self)
+
+    def stream(self, chunks):
+        self.chunks_seen = list(chunks)
+        return "".join(self.chunks_seen)
+
+
+def _attach_fake_stream(monkeypatch):
+    _FakeStream.instances.clear()
+    monkeypatch.setattr("jobs.chatbot_poll.TelegramStream", _FakeStream)
+
+
+def _fake_agent(text_chunks: list[str]) -> MagicMock:
     agent = MagicMock()
-    agent.reply.return_value = MagicMock(text="the reply", tool_calls_made=1)
+    agent.stream_reply.return_value = iter(text_chunks)
+    return agent
+
+
+def _fake_telegram() -> MagicMock:
     telegram = MagicMock()
     telegram.bot_token = "token"
     telegram._client = MagicMock()
-
-    sent: list[tuple] = []
-
-    class DummySendClient:
-        def __init__(self, *a, **kw):
-            self.calls = []
-
-        def send_message(self, text, *, parse_mode="HTML"):
-            sent.append((text, parse_mode))
-
-    monkeypatch.setattr("jobs.chatbot_poll.TelegramClient", DummySendClient)
-    return agent, telegram, sent
+    return telegram
 
 
-def test_handle_one_dispatches_and_sends_plain_text(monkeypatch):
-    agent, telegram, sent = _make_mocks(monkeypatch)
+def test_handle_one_streams_reply_via_telegram_stream(monkeypatch):
+    _attach_fake_stream(monkeypatch)
+    agent = _fake_agent(["Hello ", "world"])
     rl = RateLimiter()
     _handle_one(
-        _make_update("hello"),
+        _make_update("hi"),
         agent=agent,
-        telegram=telegram,
+        telegram=_fake_telegram(),
         owner_chat_id="-100500",
         owner_user_id=None,
         bot_username="pravys_market_bot",
         rate_limiter=rl,
     )
-    agent.reply.assert_called_once_with("hello")
-    assert sent == [("the reply", None)]
+    assert len(_FakeStream.instances) == 1
+    assert _FakeStream.instances[0].chunks_seen == ["Hello ", "world"]
+    agent.stream_reply.assert_called_once_with("hi")
     assert rl.is_limited(42)
 
 
 def test_handle_one_skips_agent_when_rate_limited(monkeypatch):
-    agent, telegram, sent = _make_mocks(monkeypatch)
+    _attach_fake_stream(monkeypatch)
+    agent = _fake_agent(["ignored"])
     rl = RateLimiter()
-    rl.mark(42)  # already rate-limited
+    rl.mark(42)
     _handle_one(
-        _make_update("hello"),
+        _make_update("hi"),
         agent=agent,
-        telegram=telegram,
+        telegram=_fake_telegram(),
         owner_chat_id="-100500",
         owner_user_id=None,
         bot_username="pravys_market_bot",
         rate_limiter=rl,
     )
-    agent.reply.assert_not_called()
-    assert sent == []
+    agent.stream_reply.assert_not_called()
+    assert _FakeStream.instances == []
 
 
 def test_handle_one_ignores_unauthorised_chat(monkeypatch):
-    agent, telegram, sent = _make_mocks(monkeypatch)
-    update = _make_update("hi", chat_id=999999)
+    _attach_fake_stream(monkeypatch)
+    agent = _fake_agent(["ignored"])
     _handle_one(
-        update,
+        _make_update("hi", chat_id=999999),
         agent=agent,
-        telegram=telegram,
+        telegram=_fake_telegram(),
         owner_chat_id="-100500",
         owner_user_id=None,
         bot_username="pravys_market_bot",
         rate_limiter=RateLimiter(),
     )
-    agent.reply.assert_not_called()
-    assert sent == []
+    agent.stream_reply.assert_not_called()
 
 
 def test_handle_one_ignores_bot_messages(monkeypatch):
-    agent, telegram, sent = _make_mocks(monkeypatch)
-    update = _make_update("from another bot")
-    update["message"]["from"]["is_bot"] = True
+    _attach_fake_stream(monkeypatch)
+    agent = _fake_agent(["ignored"])
+    upd = _make_update("from another bot")
+    upd["message"]["from"]["is_bot"] = True
     _handle_one(
-        update,
+        upd,
         agent=agent,
-        telegram=telegram,
+        telegram=_fake_telegram(),
         owner_chat_id="-100500",
         owner_user_id=None,
         bot_username="pravys_market_bot",
         rate_limiter=RateLimiter(),
     )
-    agent.reply.assert_not_called()
+    agent.stream_reply.assert_not_called()
 
 
 def test_handle_one_ignores_missing_text(monkeypatch):
-    agent, telegram, sent = _make_mocks(monkeypatch)
+    _attach_fake_stream(monkeypatch)
+    agent = _fake_agent(["ignored"])
     update = {
         "update_id": 1,
         "message": {
@@ -193,63 +205,66 @@ def test_handle_one_ignores_missing_text(monkeypatch):
     _handle_one(
         update,
         agent=agent,
-        telegram=telegram,
+        telegram=_fake_telegram(),
         owner_chat_id="-100500",
         owner_user_id=None,
         bot_username="pravys_market_bot",
         rate_limiter=RateLimiter(),
     )
-    agent.reply.assert_not_called()
+    agent.stream_reply.assert_not_called()
 
 
 def test_handle_one_rejects_long_input_without_agent_call(monkeypatch):
-    agent, telegram, sent = _make_mocks(monkeypatch)
+    _attach_fake_stream(monkeypatch)
+    sent_direct: list[tuple] = []
+
+    class DummyDirect:
+        def __init__(self, *a, **kw):
+            pass
+
+        def send_message(self, text, *, parse_mode="HTML"):
+            sent_direct.append((text, parse_mode))
+
+    monkeypatch.setattr("jobs.chatbot_poll.TelegramClient", DummyDirect)
+    agent = _fake_agent(["ignored"])
     rl = RateLimiter()
-    long_text = "x" * (MAX_INPUT_CHARS + 10)
     _handle_one(
-        _make_update(long_text),
+        _make_update("x" * (MAX_INPUT_CHARS + 10)),
         agent=agent,
-        telegram=telegram,
+        telegram=_fake_telegram(),
         owner_chat_id="-100500",
         owner_user_id=None,
         bot_username="pravys_market_bot",
         rate_limiter=rl,
     )
-    agent.reply.assert_not_called()
-    assert len(sent) == 1
-    # Plain text reply, not HTML.
-    assert sent[0][1] is None
-    assert str(MAX_INPUT_CHARS) in sent[0][0]
-    # Rate limiter NOT marked for a rejected request — user can retry shorter.
+    agent.stream_reply.assert_not_called()
+    assert len(sent_direct) == 1
+    assert sent_direct[0][1] is None  # plain text
+    assert str(MAX_INPUT_CHARS) in sent_direct[0][0]
     assert not rl.is_limited(42)
 
 
-def test_handle_one_unmarks_rate_limit_on_send_failure(monkeypatch):
-    agent = MagicMock()
-    agent.reply.return_value = MagicMock(text="the reply")
-    telegram = MagicMock()
-    telegram.bot_token = "token"
-    telegram._client = MagicMock()
-
-    class FailingSendClient:
-        def __init__(self, *a, **kw):
+def test_handle_one_unmarks_rate_limit_on_stream_failure(monkeypatch):
+    class FailingStream:
+        def __init__(self, **kwargs):
             pass
 
-        def send_message(self, text, *, parse_mode="HTML"):
-            raise RuntimeError("boom")
+        def stream(self, chunks):
+            # Consume so the iterator closes cleanly.
+            list(chunks)
+            raise RuntimeError("edit failed")
 
-    monkeypatch.setattr("jobs.chatbot_poll.TelegramClient", FailingSendClient)
-
+    monkeypatch.setattr("jobs.chatbot_poll.TelegramStream", FailingStream)
+    agent = _fake_agent(["hello"])
     rl = RateLimiter()
     with pytest.raises(RuntimeError):
         _handle_one(
-            _make_update("hello"),
+            _make_update("hi"),
             agent=agent,
-            telegram=telegram,
+            telegram=_fake_telegram(),
             owner_chat_id="-100500",
             owner_user_id=None,
             bot_username="pravys_market_bot",
             rate_limiter=rl,
         )
-    # User not locked out — they can retry.
     assert not rl.is_limited(42)
