@@ -1,0 +1,14 @@
+name = "pravys-market-bot"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Keep the Worker inside the free tier:
+# - 100k requests / day (one Telegram webhook per message is tiny volume)
+# - 10ms CPU per request on bundled plan; we use async / await so wall-clock
+#   time goes to Gemini and Upstash (external), not CPU ticks.
+workers_dev = true
+
+[vars]
+GOOGLE_AI_DEFAULT_MODEL = "gemini-2.5-pro"
+CANSLIM_PLAYBOOK_FILE_ID = ""  # populated once via scripts/upload_playbook.py
