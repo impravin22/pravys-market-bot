@@ -1,0 +1,27 @@
+name: Diagnose Telegram
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Poll last update (non-acking)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          # offset=-1 returns only the most recent update without ACKing it.
+          echo "=== getMe ==="
+          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" | python3 -m json.tool
+          echo ""
+          echo "=== getUpdates offset=-1 (peek at last) ==="
+          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?offset=-1&timeout=0" | python3 -m json.tool | head -80
+          echo ""
+          echo "=== getUpdates (no offset — all buffered) ==="
+          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=0" | python3 -c "import json, sys; d=json.load(sys.stdin); r=d.get('result', []); print(f'Count: {len(r)}'); [print(f\"  id={u['update_id']} kind={'msg' if 'message' in u else list(u.keys())[1]} text={(u.get('message') or {}).get('text','')[:80]!r} chat_id={(u.get('message') or {}).get('chat',{}).get('id')}\") for u in r]"
