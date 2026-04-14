@@ -25,14 +25,16 @@ BANK_NIFTY_TICKER = "^NSEBANK"
 INDIA_VIX_TICKER = "^INDIAVIX"
 
 # NSE-listed commodity ETFs — included in the CAN SLIM screener universe so
-# they surface alongside equities when scoring well.
+# they surface alongside equities when scoring well. Symbols verified to resolve
+# on Yahoo Finance (delisted tickers like GOLDSHARE, HDFCMFGETF, KOTAKGOLD removed).
 COMMODITY_ETFS = (
     "GOLDBEES.NS",  # Nippon India ETF Gold BeES — most liquid
     "AXISGOLD.NS",  # Axis Gold ETF
-    "GOLDSHARE.NS",  # SBI Gold ETF
-    "HDFCMFGETF.NS",  # HDFC Gold ETF
-    "KOTAKGOLD.NS",  # Kotak Gold ETF
+    "SETFGOLD.NS",  # SBI Gold ETF (NSE symbol changed from GOLDSHARE)
+    "HDFCGOLD.NS",  # HDFC Gold ETF
+    "BSLGOLDETF.NS",  # Aditya Birla Sun Life Gold ETF
     "SILVERBEES.NS",  # Nippon India Silver ETF
+    "SILVERIETF.NS",  # ICICI Prudential Silver ETF
 )
 
 # Commodity + FX tracked as a standalone "commodities pulse" section
@@ -84,18 +86,24 @@ def is_trading_day(d: date, holidays: set[date] | None = None) -> bool:
 
 @lru_cache(maxsize=1)
 def nse_holidays(year: int | None = None) -> set[date]:
-    """Fetch NSE holiday calendar. Uses `nselib`. Falls back to empty set on failure."""
-    try:
-        from nselib import capital_market  # noqa: PLC0415
+    """Fetch NSE holiday calendar. Uses `nselib`. Falls back to empty set on failure.
 
-        year = year or today_in_market().year
-        df = capital_market.nse_holiday_list(year=year)
-        # nselib returns a DataFrame; date column typically "Date"
+    ``year`` is accepted for backward compatibility but nselib's trading holiday
+    calendar endpoint is not year-filterable; it returns the current year's list.
+    """
+    _ = year  # signature kept for future use; nselib endpoint is not parameterisable
+    try:
+        from nselib.capital_market.capital_market_data import (  # noqa: PLC0415
+            trading_holiday_calendar,
+        )
+
+        df = trading_holiday_calendar()
         if df is None or df.empty:
             return set()
+        equities = df[df["Product"] == "Equities"] if "Product" in df.columns else df
         out: set[date] = set()
-        for raw in df.get("Date", []):
-            parsed = pd.to_datetime(raw, errors="coerce")
+        for raw in equities.get("tradingDate", []):
+            parsed = pd.to_datetime(raw, errors="coerce", format="%d-%b-%Y")
             if pd.notna(parsed):
                 out.add(parsed.date())
         return out
@@ -129,14 +137,39 @@ def fetch_nifty(period: str = "1y") -> StockHistory | None:
 
 
 def fetch_nifty_500_symbols() -> list[str]:
-    """Return the Nifty 500 constituent symbols in Yahoo format (TICKER.NS)."""
-    try:
-        from nselib import capital_market  # noqa: PLC0415
+    """Return the Nifty 500 constituent symbols in Yahoo format (TICKER.NS).
 
-        df = capital_market.nifty500_equity_list()
-        if df is None or df.empty:
-            return []
-        symbols = df["Symbol"].dropna().astype(str).str.strip().tolist()
+    `nselib` does not expose a single Nifty 500 endpoint, so we compose it from
+    the four overlapping lists that together cover the same universe:
+    Nifty 50 + Next 50 + Midcap 150 + Smallcap 250 = 500 tickers.
+    """
+    try:
+        from nselib.capital_market.capital_market_data import (  # noqa: PLC0415
+            nifty50_equity_list,
+            niftymidcap150_equity_list,
+            niftynext50_equity_list,
+            niftysmallcap250_equity_list,
+        )
+
+        seen: set[str] = set()
+        symbols: list[str] = []
+        for fetcher in (
+            nifty50_equity_list,
+            niftynext50_equity_list,
+            niftymidcap150_equity_list,
+            niftysmallcap250_equity_list,
+        ):
+            try:
+                df = fetcher()
+            except Exception as inner:  # noqa: BLE001 — per-list failure isn't fatal
+                logger.warning("%s failed: %s", fetcher.__name__, inner)
+                continue
+            if df is None or df.empty or "Symbol" not in df.columns:
+                continue
+            for raw in df["Symbol"].dropna().astype(str).str.strip():
+                if raw and raw not in seen:
+                    seen.add(raw)
+                    symbols.append(raw)
         return [f"{s}.NS" for s in symbols]
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_nifty_500_symbols failed: %s", exc)
@@ -182,11 +215,17 @@ def fetch_commodity_quotes() -> list[Quote]:
 
 
 def fetch_fii_dii_activity() -> pd.DataFrame | None:
-    """Recent FII/DII daily net flows. Returns None on failure."""
-    try:
-        from nselib import capital_market  # noqa: PLC0415
+    """Recent FII/DII daily net flows. Returns None on failure.
 
-        return capital_market.fii_dii_trading_activity()
+    Returns a DataFrame with columns ``category``, ``date``, ``buyValue``,
+    ``sellValue``, ``netValue`` — two rows per trading date (one FII/FPI, one DII).
+    """
+    try:
+        from nselib.capital_market.capital_market_data import (  # noqa: PLC0415
+            fii_dii_trading_activity,
+        )
+
+        return fii_dii_trading_activity()
     except Exception as exc:  # noqa: BLE001
         logger.warning("fetch_fii_dii_activity failed: %s", exc)
         return None
