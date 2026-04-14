@@ -1,104 +1,135 @@
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from bot.state import (
-    RATE_LIMIT_SECONDS,
-    is_rate_limited,
-    load_state,
-    mark_user,
-    save_state,
-)
+import pytest
+
+from bot.state import RATE_LIMIT_SECONDS, RateLimiter, load_state, save_state
 
 
 def test_load_state_returns_empty_when_missing(tmp_path: Path):
     path = tmp_path / "missing.json"
     state = load_state(path)
-    assert state == {"telegram_offset": 0, "rate_limit": {}, "last_run_at": None}
+    assert state == {"telegram_offset": 0, "last_run_at": None}
 
 
-def test_load_state_returns_empty_on_corrupt(tmp_path: Path):
+def test_load_state_returns_empty_and_logs_on_corrupt(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """Corrupt JSON must log at ERROR — silent reset would replay every queued update."""
     path = tmp_path / "bad.json"
     path.write_text("{not valid json", "utf8")
+    with caplog.at_level(logging.ERROR, logger="bot.state"):
+        state = load_state(path)
+    assert state == {"telegram_offset": 0, "last_run_at": None}
+    assert any("corrupt" in rec.message.lower() for rec in caplog.records)
+
+
+def test_load_state_preserves_corrupt_file_as_backup(tmp_path: Path):
+    path = tmp_path / "bad.json"
+    path.write_text("garbage", "utf8")
+    load_state(path)
+    # Original path gone, a timestamped backup remains for forensics.
+    assert not path.exists()
+    backups = list(tmp_path.glob("bad.corrupt-*.json"))
+    assert backups, "expected a .corrupt-<ts>.json backup file"
+
+
+def test_load_state_empty_file_returns_empty(tmp_path: Path):
+    path = tmp_path / "empty.json"
+    path.write_text("", "utf8")
     state = load_state(path)
     assert state["telegram_offset"] == 0
-    assert state["rate_limit"] == {}
 
 
-def test_round_trip(tmp_path: Path):
+def test_load_state_drops_unknown_fields(tmp_path: Path):
+    """Forwards-compat: unknown fields in the file are ignored, not kept.
+
+    Also closes the PII sink — a state file that somehow gained a
+    `rate_limit` key never re-enters memory.
+    """
     path = tmp_path / "state.json"
-    state = load_state(path)
-    state["telegram_offset"] = 42
-    mark_user(state, 123)
-    save_state(state, path)
+    path.write_text(
+        json.dumps({"telegram_offset": 7, "last_run_at": None, "rate_limit": {"42": "x"}}),
+        "utf8",
+    )
+    reloaded = load_state(path)
+    assert reloaded == {"telegram_offset": 7, "last_run_at": None}
+    assert "rate_limit" not in reloaded
 
+
+def test_save_state_round_trip(tmp_path: Path):
+    path = tmp_path / "state.json"
+    save_state({"telegram_offset": 42}, path)
     reloaded = load_state(path)
     assert reloaded["telegram_offset"] == 42
-    assert "123" in reloaded["rate_limit"]
-    assert reloaded["last_run_at"] is not None
+    # last_run_at was stamped.
+    assert datetime.fromisoformat(reloaded["last_run_at"])
 
 
-def test_is_rate_limited_false_for_unseen_user():
-    assert is_rate_limited({"rate_limit": {}}, 42) is False
-
-
-def test_is_rate_limited_true_within_window():
-    just_now = datetime.now(tz=UTC).isoformat()
-    state = {"rate_limit": {"42": just_now}}
-    assert is_rate_limited(state, 42) is True
-
-
-def test_is_rate_limited_false_after_window():
-    long_ago = (datetime.now(tz=UTC) - timedelta(seconds=RATE_LIMIT_SECONDS * 2)).isoformat()
-    state = {"rate_limit": {"42": long_ago}}
-    assert is_rate_limited(state, 42) is False
-
-
-def test_save_state_caps_rate_limit_dict(tmp_path: Path):
+def test_save_state_is_atomic_via_temp_rename(tmp_path: Path, monkeypatch):
+    """If write fails mid-way, the original file must not be truncated."""
     path = tmp_path / "state.json"
-    state = {"telegram_offset": 0, "rate_limit": {}, "last_run_at": None}
-    base = datetime.now(tz=UTC)
-    for i in range(300):
-        state["rate_limit"][str(i)] = (base - timedelta(seconds=i)).isoformat()
-    save_state(state, path)
-    reloaded = json.loads(path.read_text("utf8"))
-    assert len(reloaded["rate_limit"]) <= 200
+    path.write_text(json.dumps({"telegram_offset": 99, "last_run_at": None}), "utf8")
+
+    def boom(self, target):
+        raise OSError("simulated rename failure")
+
+    monkeypatch.setattr(Path, "replace", boom)
+    with pytest.raises(OSError):
+        save_state({"telegram_offset": 100}, path)
+    # Original file intact.
+    assert json.loads(path.read_text("utf8"))["telegram_offset"] == 99
 
 
-def test_save_state_stamps_last_run_at(tmp_path: Path):
+def test_save_state_refuses_to_persist_rate_limit_keys(tmp_path: Path):
+    """PII guard: even if caller passes a rate_limit dict, it is never written."""
     path = tmp_path / "state.json"
-    save_state({"telegram_offset": 1, "rate_limit": {}, "last_run_at": None}, path)
-    saved = json.loads(path.read_text("utf8"))
-    # Parseable ISO timestamp within a couple of seconds of "now".
-    stamped = datetime.fromisoformat(saved["last_run_at"])
-    assert abs((datetime.now(tz=UTC) - stamped).total_seconds()) < 5
+    save_state({"telegram_offset": 1, "rate_limit": {"1234": "ts"}}, path)
+    raw = path.read_text("utf8")
+    assert "rate_limit" not in raw
+    assert "1234" not in raw
 
 
-def test_mark_user_uses_iso_string():
-    state = {"rate_limit": {}}
-    mark_user(state, "abc")
-    assert "abc" in state["rate_limit"]
-    # Parseable
-    datetime.fromisoformat(state["rate_limit"]["abc"])
+def test_rate_limiter_not_limited_for_unseen_user():
+    rl = RateLimiter()
+    assert rl.is_limited(42) is False
 
 
-def test_malformed_timestamp_treated_as_not_limited():
-    """Corruption mustn't lock the bot out forever — treat bad data as 'not recent'."""
-    state = {"rate_limit": {"42": "not-a-timestamp"}}
-    assert is_rate_limited(state, 42) is False
+def test_rate_limiter_limited_after_mark():
+    rl = RateLimiter()
+    rl.mark(42)
+    assert rl.is_limited(42) is True
 
 
-def test_save_state_is_deterministic(tmp_path: Path):
-    """Keys sorted so git diffs stay clean on the state branch."""
-    path = tmp_path / "state.json"
-    state = {
-        "rate_limit": {"z": "t", "a": "t"},
-        "telegram_offset": 10,
-        "last_run_at": None,
-    }
-    save_state(state, path)
-    content = path.read_text("utf8")
-    assert content.index('"last_run_at"') < content.index('"rate_limit"')
-    assert content.index('"rate_limit"') < content.index('"telegram_offset"')
-    # Using `with pytest.raises` is unnecessary here; this is a sanity assert.
-    assert '"a":' in content
+def test_rate_limiter_expires_after_window():
+    rl = RateLimiter(seconds=1)
+    rl._last["42"] = datetime.now(tz=UTC) - timedelta(seconds=5)  # noqa: SLF001
+    assert rl.is_limited(42) is False
+
+
+def test_rate_limiter_unmark_releases_slot():
+    rl = RateLimiter()
+    rl.mark(42)
+    rl.unmark(42)
+    assert rl.is_limited(42) is False
+
+
+def test_rate_limiter_stringifies_user_ids():
+    """Treat 42 (int) and '42' (str) as the same user."""
+    rl = RateLimiter()
+    rl.mark(42)
+    assert rl.is_limited("42")
+
+
+def test_rate_limiter_uses_default_window_constant():
+    """Ensure the default window matches the exported RATE_LIMIT_SECONDS."""
+    rl = RateLimiter()
+    rl.mark(42)
+    assert rl.is_limited(42)
+    # Force expiry by back-dating the mark exactly RATE_LIMIT_SECONDS+1 seconds.
+    rl._last["42"] = datetime.now(tz=UTC) - timedelta(  # noqa: SLF001
+        seconds=RATE_LIMIT_SECONDS + 1
+    )
+    assert rl.is_limited(42) is False
