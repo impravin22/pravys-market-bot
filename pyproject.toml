@@ -1,0 +1,35 @@
+[project]
+name = "pravys-market-bot"
+version = "0.1.0"
+description = "CAN SLIM-driven NSE market pulse — twice-daily Telegram digests + weekly top-3 + @mention responder"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "yfinance>=0.2.50",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "nselib>=2.0",
+    "google-genai>=1.0",
+    "httpx>=0.28",
+    "python-dotenv>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --tb=short"

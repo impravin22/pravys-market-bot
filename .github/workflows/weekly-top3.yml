@@ -1,0 +1,30 @@
+name: Weekly Top 3
+
+on:
+  schedule:
+    # Sunday 22:00 Asia/Taipei = 14:00 UTC
+    - cron: "0 14 * * 0"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  picks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - name: Send weekly top 3
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GOOGLE_SEARCH_API_KEY: ${{ secrets.GOOGLE_SEARCH_API_KEY }}
+          GOOGLE_CSE_ID: ${{ secrets.GOOGLE_CSE_ID }}
+          GOOGLE_AI_DEFAULT_MODEL: gemini-2.5-pro
+        run: uv run python -m jobs.weekly_top3
