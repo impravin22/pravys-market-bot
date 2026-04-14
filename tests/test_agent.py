@@ -23,14 +23,49 @@ def test_system_instruction_enforces_house_style():
 
 
 def test_system_instruction_bans_compliance_disclaimers():
-    """Pravy's rule — no 'Educational signals' or DYOR tail."""
-    assert (
-        "Educational signals, not investment advice."
-        not in SYSTEM_INSTRUCTION.replace('"Educational signals, not investment advice."', "")
-        or "BANNED" in SYSTEM_INSTRUCTION
-    )
-    # The BANNED LINES section must call them out by name.
+    """Pravy's rule — no 'Educational signals' or DYOR tail in the reply output."""
+    # The BANNED LINES section must call each string out by name.
     assert "BANNED LINES" in SYSTEM_INSTRUCTION
+    banned_start = SYSTEM_INSTRUCTION.index("BANNED LINES")
+    banned_block = SYSTEM_INSTRUCTION[banned_start:]
+    assert '"Educational signals, not investment advice."' in banned_block
+    assert '"Do your own research."' in banned_block
+    assert '"I am not a financial adviser."' in banned_block
+
+
+def test_system_instruction_mandates_grounding_per_numeric_claim():
+    assert "Use Google Search for every numeric claim" in SYSTEM_INSTRUCTION
+    # No citations fabricated from thin air — Gemini must either cite
+    # what Search actually returned or flag "from memory, unverified".
+    assert "from memory, unverified" in SYSTEM_INSTRUCTION
+
+
+def test_system_instruction_forbids_guessing_on_missing_data():
+    assert "Never guess, never interpolate" in SYSTEM_INSTRUCTION
+    assert "I couldn't verify" in SYSTEM_INSTRUCTION
+
+
+def test_system_instruction_requires_one_line_why_before_letters():
+    assert "Why it fits" in SYSTEM_INSTRUCTION
+    assert "one-line WHY" in SYSTEM_INSTRUCTION
+
+
+def test_system_instruction_requires_actual_values_not_pass_fail():
+    assert "State actual values" in SYSTEM_INSTRUCTION
+
+
+def test_system_instruction_has_regime_awareness():
+    low = SYSTEM_INSTRUCTION.lower()
+    assert "downtrend" in low
+    assert "sit tight" in low or "stay small" in low
+
+
+def test_system_instruction_locks_formatting_contract_for_renderer():
+    """The markdown-to-html converter depends on Gemini emitting **bold** and '* '/'- ' bullets."""
+    assert "double-asterisks" in SYSTEM_INSTRUCTION
+    assert '"* "' in SYSTEM_INSTRUCTION or '"- "' in SYSTEM_INSTRUCTION
+    assert 'raw "<"' in SYSTEM_INSTRUCTION
+    assert "₹" in SYSTEM_INSTRUCTION
 
 
 def test_is_retryable_gemini_error_detects_503():
