@@ -4,11 +4,33 @@ from bot.agent import SYSTEM_INSTRUCTION, HermesAgent, _is_retryable_gemini_erro
 
 
 def test_system_instruction_enforces_house_style():
+    # Opening phrase for market asks.
     assert "According to Pravy's CAN SLIM philosophy" in SYSTEM_INSTRUCTION
-    assert "Educational signals, not investment advice" in SYSTEM_INSTRUCTION
+    # Pravy's sign-off replaces the compliance disclaimer.
+    assert "This is how Pravy thinks — take it or leave it, mate" in SYSTEM_INSTRUCTION
+    # British voice mandate.
+    assert "British English" in SYSTEM_INSTRUCTION
+    assert "mate" in SYSTEM_INSTRUCTION
+    # Risk rules still cited.
     assert "7–8%" in SYSTEM_INSTRUCTION
     assert "20–25%" in SYSTEM_INSTRUCTION
+    # Live-data behaviour mandated.
     assert "Google Search" in SYSTEM_INSTRUCTION
+    # Banter and off-topic handling are explicit.
+    assert "Banter" in SYSTEM_INSTRUCTION or "banter" in SYSTEM_INSTRUCTION
+    assert "Off-topic" in SYSTEM_INSTRUCTION or "off-topic" in SYSTEM_INSTRUCTION
+    assert "stocks only" in SYSTEM_INSTRUCTION.lower() or "stocks, eh" in SYSTEM_INSTRUCTION
+
+
+def test_system_instruction_bans_compliance_disclaimers():
+    """Pravy's rule — no 'Educational signals' or DYOR tail."""
+    assert (
+        "Educational signals, not investment advice."
+        not in SYSTEM_INSTRUCTION.replace('"Educational signals, not investment advice."', "")
+        or "BANNED" in SYSTEM_INSTRUCTION
+    )
+    # The BANNED LINES section must call them out by name.
+    assert "BANNED LINES" in SYSTEM_INSTRUCTION
 
 
 def test_is_retryable_gemini_error_detects_503():

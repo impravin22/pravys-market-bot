@@ -27,7 +27,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-PLACEHOLDER_TEXT = "⏳ Thinking…"
+PLACEHOLDER_TEXT = "⏳ Give me a sec, mate…"
 EDIT_INTERVAL_SECONDS = 1.2
 TELEGRAM_MAX_CHARS = 4096
 TRUNCATION_SUFFIX = "\n\n… (response truncated at Telegram's 4 000 character limit)"
