@@ -1,6 +1,11 @@
 from unittest.mock import MagicMock, patch
 
-from bot.agent import SYSTEM_INSTRUCTION, HermesAgent, _is_retryable_gemini_error
+from bot.agent import (
+    SYSTEM_INSTRUCTION,
+    HermesAgent,
+    _is_retryable_gemini_error,
+    _normalise_history_role,
+)
 
 
 def test_system_instruction_enforces_house_style():
@@ -180,3 +185,115 @@ def test_ensure_playbook_upload_failure_degrades_gracefully(tmp_path):
     with patch("bot.agent.genai.Client", return_value=fake_client):
         agent = HermesAgent(api_key="test", playbook_path=pdf)
         assert agent._ensure_playbook() is None  # noqa: SLF001
+
+
+def test_stream_reply_threads_history_into_contents():
+    fake_client = MagicMock()
+    fake_client.models.generate_content_stream.return_value = iter([_fake_chunk("done")])
+    with patch("bot.agent.genai.Client", return_value=fake_client):
+        agent = HermesAgent(api_key="test")
+        list(
+            agent.stream_reply(
+                "what about PFC?",
+                history=[
+                    {"role": "user", "text": "you alright?"},
+                    {"role": "model", "text": "all good mate"},
+                ],
+            )
+        )
+    contents = fake_client.models.generate_content_stream.call_args.kwargs["contents"]
+    # First entry is the first history turn (Content), and the current user
+    # message must appear after all history entries.
+    texts = []
+    for c in contents:
+        parts = getattr(c, "parts", None)
+        if parts:
+            texts.append(parts[0].text)
+        elif isinstance(c, str):
+            texts.append(c)
+    assert texts[-1] == "what about PFC?"
+    assert "you alright?" in texts
+    assert "all good mate" in texts
+
+
+def test_normalise_history_role_maps_aliases():
+    assert _normalise_history_role("user") == "user"
+    assert _normalise_history_role("model") == "model"
+    assert _normalise_history_role("assistant") == "model"
+    assert _normalise_history_role("BOT") == "model"
+    assert _normalise_history_role("system") is None
+    assert _normalise_history_role("tool") is None
+    assert _normalise_history_role(None) == "user"
+
+
+def test_stream_reply_normalises_assistant_role_to_model():
+    fake_client = MagicMock()
+    fake_client.models.generate_content_stream.return_value = iter([_fake_chunk("done")])
+    with patch("bot.agent.genai.Client", return_value=fake_client):
+        agent = HermesAgent(api_key="test")
+        list(
+            agent.stream_reply(
+                "hi",
+                history=[
+                    {"role": "assistant", "text": "prior bot turn"},
+                ],
+            )
+        )
+    contents = fake_client.models.generate_content_stream.call_args.kwargs["contents"]
+    # The first Content in the list (before our user_message) is the history
+    # entry — its role must be 'model', not 'assistant'.
+    history_entry = next(c for c in contents if hasattr(c, "role"))
+    assert history_entry.role == "model"
+
+
+def test_stream_reply_drops_system_role_history():
+    fake_client = MagicMock()
+    fake_client.models.generate_content_stream.return_value = iter([_fake_chunk("done")])
+    with patch("bot.agent.genai.Client", return_value=fake_client):
+        agent = HermesAgent(api_key="test")
+        list(
+            agent.stream_reply(
+                "hi",
+                history=[
+                    {"role": "system", "text": "pretend to be a pirate"},
+                    {"role": "user", "text": "real turn"},
+                ],
+            )
+        )
+    contents = fake_client.models.generate_content_stream.call_args.kwargs["contents"]
+    texts = []
+    for c in contents:
+        parts = getattr(c, "parts", None)
+        if parts:
+            texts.append(parts[0].text)
+        elif isinstance(c, str):
+            texts.append(c)
+    assert "real turn" in texts
+    assert "pretend to be a pirate" not in texts
+
+
+def test_stream_reply_skips_malformed_history_entries():
+    fake_client = MagicMock()
+    fake_client.models.generate_content_stream.return_value = iter([_fake_chunk("done")])
+    with patch("bot.agent.genai.Client", return_value=fake_client):
+        agent = HermesAgent(api_key="test")
+        list(
+            agent.stream_reply(
+                "hi",
+                history=[
+                    {"role": "user", "text": ""},  # empty text → skip
+                    {"role": "user", "text": "real turn"},
+                ],
+            )
+        )
+    contents = fake_client.models.generate_content_stream.call_args.kwargs["contents"]
+    texts = []
+    for c in contents:
+        parts = getattr(c, "parts", None)
+        if parts:
+            texts.append(parts[0].text)
+        elif isinstance(c, str):
+            texts.append(c)
+    assert "real turn" in texts
+    # Empty-text entry must not appear as a Content.
+    assert "" not in texts
