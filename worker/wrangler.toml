@@ -11,4 +11,6 @@ workers_dev = true
 
 [vars]
 GOOGLE_AI_DEFAULT_MODEL = "gemini-2.5-pro"
-CANSLIM_PLAYBOOK_FILE_ID = ""  # populated once via scripts/upload_playbook.py
+# CAN SLIM playbook URI from Gemini Files API. Re-upload via
+# `scripts/upload_playbook.py` if Gemini reports it expired.
+CANSLIM_PLAYBOOK_FILE_ID = "https://generativelanguage.googleapis.com/v1beta/files/b68ifevz15qk"
