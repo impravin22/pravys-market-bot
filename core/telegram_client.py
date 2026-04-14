@@ -36,13 +36,19 @@ class TelegramClient:
         self.base = f"{TELEGRAM_API}/bot{bot_token}"
         self._client = client or httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS)
 
-    def send_message(self, text: str, *, parse_mode: str = "HTML") -> TelegramSendResult:
-        data = {
+    def send_message(self, text: str, *, parse_mode: str | None = "HTML") -> TelegramSendResult:
+        """Send a Telegram message.
+
+        Pass ``parse_mode=None`` to skip HTML/Markdown parsing — required
+        for any free-form LLM output that could contain stray ``<``/``>``.
+        """
+        data: dict[str, str] = {
             "chat_id": self.chat_id,
             "text": text,
-            "parse_mode": parse_mode,
             "disable_web_page_preview": "true",
         }
+        if parse_mode:
+            data["parse_mode"] = parse_mode
         return self._call("sendMessage", data=data)
 
     def send_document(
