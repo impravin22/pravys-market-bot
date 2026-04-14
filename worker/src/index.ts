@@ -46,6 +46,25 @@ export interface Env {
 const MAX_INPUT_CHARS = 1000;
 const RATE_LIMIT_SECONDS = 30;
 
+/**
+ * Constant-time string comparison. Plain `===` short-circuits on the
+ * first differing byte, leaking the secret one byte at a time over
+ * enough timing samples — Workers run on shared edges so this is a
+ * realistic threat for the webhook secret.
+ */
+async function timingSafeEqual(a: string, b: string): Promise<boolean> {
+  const enc = new TextEncoder();
+  const ab = enc.encode(a);
+  const bb = enc.encode(b);
+  // Compare a fixed-length digest of both inputs so length differences
+  // don't leak via early-exit timing.
+  const da = new Uint8Array(await crypto.subtle.digest("SHA-256", ab));
+  const db = new Uint8Array(await crypto.subtle.digest("SHA-256", bb));
+  let diff = ab.byteLength === bb.byteLength ? 0 : 1;
+  for (let i = 0; i < da.byteLength; i++) diff |= da[i] ^ db[i];
+  return diff === 0;
+}
+
 function isAuthorisedChat(chatId: number | string, env: Env): boolean {
   const target = String(chatId);
   if (target === env.TELEGRAM_CHAT_ID) return true;
@@ -159,9 +178,10 @@ export default {
     }
 
     // Verify Telegram's secret-token header. Telegram sends this exactly
-    // when `setWebhook` was called with `secret_token=…`.
-    const provided = request.headers.get("x-telegram-bot-api-secret-token");
-    if (provided !== env.TELEGRAM_WEBHOOK_SECRET) {
+    // when `setWebhook` was called with `secret_token=…`. Constant-time
+    // compare to avoid leaking the secret via byte-by-byte timing.
+    const provided = request.headers.get("x-telegram-bot-api-secret-token") ?? "";
+    if (!(await timingSafeEqual(provided, env.TELEGRAM_WEBHOOK_SECRET))) {
       return new Response("forbidden", { status: 403 });
     }
 
@@ -173,9 +193,25 @@ export default {
     }
 
     // Ack Telegram within the same request — process in the background.
+    // Telegram retries non-200 responses, so we MUST always 200 here even
+    // if downstream handling throws. The catch ships an in-chat error so
+    // the user isn't staring at silence when something fails before the
+    // streaming placeholder is even sent.
     ctx.waitUntil(
-      handleUpdate(update, env).catch((exc: unknown) => {
+      handleUpdate(update, env).catch(async (exc: unknown) => {
         console.error("handler failed for update_id=", update.update_id, exc);
+        try {
+          const chatId = update.message?.chat?.id;
+          if (chatId && isAuthorisedChat(chatId, env)) {
+            const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
+            await tg.sendMessage(
+              chatId,
+              "⚠️ Something broke on my end, mate — tag Pravy if this keeps happening.",
+            );
+          }
+        } catch (notifyExc) {
+          console.error("failed to notify user of handler failure:", notifyExc);
+        }
       }),
     );
     return new Response("ok", { status: 200 });

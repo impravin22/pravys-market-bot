@@ -125,16 +125,29 @@ export class RedisStore {
   }
 
   async getHistory(chatId: string | number): Promise<HistoryTurn[]> {
-    const raw = await this.call("GET", await this.historyKey(chatId));
+    const key = await this.historyKey(chatId);
+    const raw = await this.call("GET", key);
     if (typeof raw !== "string") return [];
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
-    } catch {
+    } catch (exc) {
+      console.error(
+        `chat history JSON corrupt at ${key} (len=${raw.length}); self-healing by deleting:`,
+        (exc as Error).message,
+      );
+      // Self-heal: drop the corrupt key so the next turn starts fresh.
+      await this.call("DEL", key).catch((delExc) =>
+        console.error("failed to delete corrupt history key:", (delExc as Error).message),
+      );
       return [];
     }
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
+    if (!Array.isArray(parsed)) {
+      console.error(`chat history at ${key} is not an array; self-healing by deleting`);
+      await this.call("DEL", key).catch(() => {});
+      return [];
+    }
+    const valid = parsed.filter(
       (t): t is HistoryTurn =>
         !!t &&
         typeof t === "object" &&
@@ -142,6 +155,12 @@ export class RedisStore {
         "text" in t &&
         typeof (t as { text: unknown }).text === "string",
     );
+    if (valid.length !== parsed.length) {
+      console.warn(
+        `dropped ${parsed.length - valid.length}/${parsed.length} malformed history turns at ${key}`,
+      );
+    }
+    return valid;
   }
 
   async appendTurn(

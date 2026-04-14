@@ -63,6 +63,34 @@ export class TelegramStream {
       this.lastHtml = null; // plain override — next edit must re-render
       return;
     }
+    // Recovery: original placeholder vanished (admin deleted it, message
+    // is too old to edit, etc). Send a fresh message and continue editing
+    // that one instead. The user still sees the reply.
+    if (
+      description.includes("message to edit not found") ||
+      description.includes("message can't be edited") ||
+      description.includes("message_id_invalid")
+    ) {
+      console.warn("placeholder vanished; sending fresh message", {
+        chatId: this.chatId,
+        oldMessageId: this.messageId,
+      });
+      this.messageId = await this.telegram.sendMessage(this.chatId, text);
+      this.lastHtml = null;
+      return;
+    }
+    // Bot was kicked / chat blocked / user deactivated — no point retrying.
+    if (
+      description.includes("bot was blocked") ||
+      description.includes("user is deactivated") ||
+      description.includes("chat not found")
+    ) {
+      throw new Error(`editMessageText terminal: ${result.description ?? "unknown"}`);
+    }
+    // Flood control — propagate so caller can back off explicitly.
+    if (description.includes("too many requests") || description.includes("retry after")) {
+      throw new Error(`editMessageText flood: ${result.description ?? "unknown"}`);
+    }
     throw new Error(`editMessageText failed: ${result.description ?? "unknown"}`);
   }
 

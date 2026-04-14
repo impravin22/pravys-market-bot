@@ -1,8 +1,12 @@
 name: Deploy Worker
 
 # Auto-deploys the Cloudflare Worker on every push to main that touches
-# `worker/**`. Pushes runtime secrets to the Worker before each deploy
-# (idempotent — Cloudflare keeps the latest value), then deploys.
+# `worker/**`. Pushes runtime secrets to the Worker (idempotent), deploys
+# via wrangler, smoke-tests the health endpoint, then sets the Telegram
+# webhook to the freshly-deployed URL.
+#
+# DO NOT enable `set -x` in the secret-injection step — it would echo
+# secrets into the public Actions log.
 on:
   push:
     branches: [main]
@@ -37,44 +41,59 @@ jobs:
       - run: npm run typecheck
       - run: npm test
 
-      # Push runtime secrets first. Wrangler skips re-deploy if values
-      # are unchanged; first run on a fresh Worker creates them.
       - name: Push runtime secrets to Worker
         run: |
           set -euo pipefail
-          push_secret() {
+          push_required() {
             local name="$1"; local value="$2"
             if [ -z "$value" ]; then
-              echo "skip $name (empty)"
+              echo "::error::Required secret $name is empty — refusing to deploy a broken Worker"
+              exit 1
+            fi
+            # `printf %s` avoids the trailing newline `echo` would append.
+            printf '%s' "$value" | npx wrangler secret put "$name"
+          }
+          push_optional() {
+            local name="$1"; local value="$2"
+            if [ -z "$value" ]; then
+              echo "::notice::Skipping optional secret $name (empty)"
               return
             fi
-            echo "$value" | npx wrangler secret put "$name"
+            printf '%s' "$value" | npx wrangler secret put "$name"
           }
-          push_secret TELEGRAM_BOT_TOKEN '${{ secrets.TELEGRAM_BOT_TOKEN }}'
-          push_secret TELEGRAM_CHAT_ID '${{ secrets.TELEGRAM_CHAT_ID }}'
-          push_secret TELEGRAM_OWNER_USER_ID '${{ secrets.TELEGRAM_OWNER_USER_ID }}'
-          push_secret TELEGRAM_WEBHOOK_SECRET '${{ secrets.TELEGRAM_WEBHOOK_SECRET }}'
-          push_secret GOOGLE_API_KEY '${{ secrets.GOOGLE_API_KEY }}'
-          push_secret UPSTASH_REDIS_REST_URL '${{ secrets.UPSTASH_REDIS_REST_URL }}'
-          push_secret UPSTASH_REDIS_REST_TOKEN '${{ secrets.UPSTASH_REDIS_REST_TOKEN }}'
-          push_secret BOT_USER_ID_SALT '${{ secrets.BOT_USER_ID_SALT }}'
+          push_required TELEGRAM_BOT_TOKEN '${{ secrets.TELEGRAM_BOT_TOKEN }}'
+          push_required TELEGRAM_CHAT_ID '${{ secrets.TELEGRAM_CHAT_ID }}'
+          push_required TELEGRAM_WEBHOOK_SECRET '${{ secrets.TELEGRAM_WEBHOOK_SECRET }}'
+          push_required GOOGLE_API_KEY '${{ secrets.GOOGLE_API_KEY }}'
+          push_required UPSTASH_REDIS_REST_URL '${{ secrets.UPSTASH_REDIS_REST_URL }}'
+          push_required UPSTASH_REDIS_REST_TOKEN '${{ secrets.UPSTASH_REDIS_REST_TOKEN }}'
+          push_required BOT_USER_ID_SALT '${{ secrets.BOT_USER_ID_SALT }}'
+          push_optional TELEGRAM_OWNER_USER_ID '${{ secrets.TELEGRAM_OWNER_USER_ID }}'
 
       - name: Deploy Worker
         id: deploy
         run: |
           set -euo pipefail
-          # Capture wrangler output so we can extract the Worker URL.
           npx wrangler deploy 2>&1 | tee deploy.log
           worker_url=$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -n1)
           if [ -z "$worker_url" ]; then
-            echo "Failed to extract Worker URL from deploy output" >&2
+            echo "::error::Failed to extract Worker URL from deploy output"
             exit 1
           fi
           echo "worker_url=$worker_url" >> "$GITHUB_OUTPUT"
 
-      # Register the Telegram webhook to point at the freshly-deployed
-      # Worker. setWebhook is idempotent; re-running with the same URL
-      # is a no-op.
+      - name: Smoke-test Worker health endpoint
+        env:
+          WORKER_URL: ${{ steps.deploy.outputs.worker_url }}
+        run: |
+          set -euo pipefail
+          response=$(curl -sSf "$WORKER_URL")
+          echo "Health check response: $response"
+          if [ "$response" != "pravys-market-bot worker OK" ]; then
+            echo "::error::Worker health check returned unexpected body: $response"
+            exit 1
+          fi
+
       - name: Set Telegram webhook
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -82,9 +101,15 @@ jobs:
           WORKER_URL: ${{ steps.deploy.outputs.worker_url }}
         run: |
           set -euo pipefail
-          curl -sS -X POST \
+          result=$(curl -sS -X POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
             -d "url=${WORKER_URL}" \
             -d "secret_token=${TELEGRAM_WEBHOOK_SECRET}" \
             -d "allowed_updates=[\"message\"]" \
-            -d "drop_pending_updates=false" | python3 -m json.tool
+            -d "drop_pending_updates=false")
+          echo "$result" | python3 -m json.tool
+          # Verify Telegram actually accepted it.
+          echo "$result" | python3 -c "import sys, json; sys.exit(0 if json.load(sys.stdin).get('ok') else 1)" || {
+            echo "::error::setWebhook reported failure"
+            exit 1
+          }

@@ -1,5 +1,40 @@
 import { describe, expect, it } from "vitest";
-import { SYSTEM_INSTRUCTION, normaliseHistoryRole } from "../src/agent";
+import { SYSTEM_INSTRUCTION, classifyGeminiError, normaliseHistoryRole } from "../src/agent";
+
+describe("classifyGeminiError", () => {
+  it("503 with 'unavailable' is retryable", () => {
+    expect(classifyGeminiError(new Error("503 UNAVAILABLE high demand"))).toBe("retryable");
+  });
+
+  it("502 / 504 / timeout are retryable", () => {
+    expect(classifyGeminiError(new Error("Gateway 502"))).toBe("retryable");
+    expect(classifyGeminiError(new Error("504 timeout"))).toBe("retryable");
+    expect(classifyGeminiError(new Error("request timeout"))).toBe("retryable");
+  });
+
+  it("expired playbook file gets its own bucket", () => {
+    expect(classifyGeminiError(new Error("File files/abc has expired"))).toBe("playbook_expired");
+    expect(classifyGeminiError(new Error("File not found"))).toBe("playbook_expired");
+  });
+
+  it("auth errors", () => {
+    expect(classifyGeminiError(new Error("API key not valid"))).toBe("auth");
+    expect(classifyGeminiError(new Error("403 PERMISSION_DENIED"))).toBe("auth");
+  });
+
+  it("quota errors", () => {
+    expect(classifyGeminiError(new Error("429 RESOURCE_EXHAUSTED"))).toBe("quota");
+    expect(classifyGeminiError(new Error("quota exceeded"))).toBe("quota");
+  });
+
+  it("content / token-count errors", () => {
+    expect(classifyGeminiError(new Error("Token count 200000 exceeds limit"))).toBe("content");
+  });
+
+  it("unknown errors", () => {
+    expect(classifyGeminiError(new Error("Some random thing"))).toBe("unknown");
+  });
+});
 
 describe("SYSTEM_INSTRUCTION", () => {
   it("contains the CAN SLIM opener, Pravy sign-off, British voice mandate", () => {

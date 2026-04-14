@@ -105,12 +105,66 @@ export interface AgentConfig {
 const RETRY_ATTEMPTS = 3;
 const RETRY_BACKOFFS_MS = [1500, 3000];
 
-function isRetryableGeminiError(exc: Error): boolean {
+export type GeminiErrorKind =
+  | "retryable"
+  | "playbook_expired"
+  | "auth"
+  | "quota"
+  | "content"
+  | "unknown";
+
+export function classifyGeminiError(exc: Error): GeminiErrorKind {
   const msg = exc.message.toLowerCase();
-  if (msg.includes("503") && (msg.includes("unavailable") || msg.includes("overloaded") || msg.includes("demand"))) {
-    return true;
+  if (
+    msg.includes("file") &&
+    (msg.includes("expired") ||
+      msg.includes("not found") ||
+      msg.includes("failed state") ||
+      msg.includes("permission denied"))
+  ) {
+    return "playbook_expired";
   }
-  return msg.includes("502") || msg.includes("504") || msg.includes("timeout");
+  if (
+    msg.includes("api key") ||
+    msg.includes("api_key") ||
+    msg.includes("401") ||
+    msg.includes("permission_denied") ||
+    msg.includes("403")
+  ) {
+    return "auth";
+  }
+  if (msg.includes("429") || msg.includes("quota") || msg.includes("resource_exhausted")) {
+    return "quota";
+  }
+  if (msg.includes("token count") || msg.includes("invalid_argument")) {
+    return "content";
+  }
+  if (msg.includes("503") && (msg.includes("unavailable") || msg.includes("overloaded") || msg.includes("demand"))) {
+    return "retryable";
+  }
+  if (msg.includes("502") || msg.includes("504") || msg.includes("timeout")) {
+    return "retryable";
+  }
+  return "unknown";
+}
+
+function fallbackMessageFor(kind: GeminiErrorKind): string {
+  switch (kind) {
+    case "playbook_expired":
+      return (
+        "Right mate, the CAN SLIM playbook file expired on my side — " +
+        "tell Pravy to re-run `scripts/upload_playbook.py`. I'll keep " +
+        "going from memory in the meantime."
+      );
+    case "auth":
+      return "⚠️ My Google API key is knackered, mate — Pravy needs to rotate it. Bot is down until then.";
+    case "quota":
+      return "I've hit today's Gemini quota, mate. Try again tomorrow, or tag Pravy to bump the limits.";
+    case "content":
+      return "Our conversation got too long for me to process — try /reset to clear and start fresh.";
+    default:
+      return "Sorry — I hit a snag fetching the market data right now. Try again in a minute.";
+  }
 }
 
 export function normaliseHistoryRole(role: string | undefined | null): "user" | "model" | null {
@@ -154,6 +208,7 @@ export class HermesAgent {
     const systemInstruction = this.config.systemInstruction ?? SYSTEM_INSTRUCTION;
 
     let lastError: Error | null = null;
+    let droppedPlaybook = false;
     for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
       try {
         const stream = await this.client.models.generateContentStream({
@@ -178,20 +233,40 @@ export class HermesAgent {
         return;
       } catch (exc) {
         lastError = exc as Error;
-        if (attempt < RETRY_ATTEMPTS && isRetryableGeminiError(lastError)) {
+        const kind = classifyGeminiError(lastError);
+        // Special recovery: if the CAN SLIM playbook URI expired, drop it
+        // from the next attempt's contents and retry without the PDF.
+        if (kind === "playbook_expired" && !droppedPlaybook) {
+          console.error(
+            "Gemini reports CAN SLIM playbook URI expired; retrying without PDF context:",
+            lastError.message,
+          );
+          for (const part of currentParts) {
+            if ("fileData" in part) {
+              const idx = currentParts.indexOf(part);
+              if (idx !== -1) currentParts.splice(idx, 1);
+            }
+          }
+          droppedPlaybook = true;
+          continue;
+        }
+        if (attempt < RETRY_ATTEMPTS && kind === "retryable") {
           const backoff = RETRY_BACKOFFS_MS[Math.min(attempt - 1, RETRY_BACKOFFS_MS.length - 1)];
           console.warn(
-            `Gemini transient failure attempt ${attempt}/${RETRY_ATTEMPTS}:`,
+            `Gemini transient failure attempt ${attempt}/${RETRY_ATTEMPTS} (${kind}):`,
             lastError.message,
             `— retrying in ${backoff}ms`,
           );
           await sleep(backoff);
           continue;
         }
-        break;
+        console.error(`[gemini:${kind}] ${lastError.message}`);
+        yield fallbackMessageFor(kind);
+        return;
       }
     }
-    console.error("Hermes agent failed:", lastError?.message);
-    yield "Sorry — I hit a snag fetching the market data right now. Try again in a minute.";
+    const finalKind = lastError ? classifyGeminiError(lastError) : "unknown";
+    console.error(`[gemini:${finalKind}] retries exhausted: ${lastError?.message}`);
+    yield fallbackMessageFor(finalKind);
   }
 }
