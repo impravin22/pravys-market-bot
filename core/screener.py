@@ -70,14 +70,19 @@ def detect_market_regime(nifty_history: StockHistory) -> MarketRegime:
 
 
 def _fii_dii_net_positive_5d(df: pd.DataFrame | None) -> bool | None:
+    """True if combined FII + DII net flow over recent days is positive.
+
+    nselib returns a two-row snapshot (one FII/FPI row, one DII row) with
+    columns ``category``, ``date``, ``buyValue``, ``sellValue``, ``netValue``
+    — the current-day endpoint only, so the "5d" window is approximate.
+    """
     if df is None or df.empty:
         return None
-    # nselib returns columns like ["Date", "Category", "Buy_Value", "Sell_Value", "Net_Value"]
-    if "Net_Value" not in df.columns:
+    col = next((c for c in ("netValue", "Net_Value", "NetValue") if c in df.columns), None)
+    if col is None:
         return None
-    recent = df.tail(10)
     try:
-        total_net = pd.to_numeric(recent["Net_Value"], errors="coerce").sum()
+        total_net = pd.to_numeric(df[col], errors="coerce").sum()
         return bool(total_net > 0)
     except (ValueError, TypeError):
         return None
