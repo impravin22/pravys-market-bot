@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -64,9 +65,14 @@ def _top_n(scored: list[CanslimScore], n: int = 10) -> list[CanslimScore]:
 def main() -> int:
     config = load_config()
     today = today_in_market()
-    if not is_trading_day(today, holidays=nse_holidays()):
+    force_run = os.getenv("FORCE_RUN", "false").lower() == "true"
+    if not force_run and not is_trading_day(today, holidays=nse_holidays()):
         logger.info("%s is not an NSE trading day — skipping morning pulse", today)
         return 0
+    if force_run:
+        logger.info(
+            "FORCE_RUN is set — running pulse even though %s may not be a trading day", today
+        )
 
     indices = _gather_indices()
     commodities = fetch_commodity_quotes()

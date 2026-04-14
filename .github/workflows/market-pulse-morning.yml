@@ -4,7 +4,13 @@ on:
   schedule:
     # 11:00 Asia/Taipei = 08:30 Asia/Kolkata = 03:00 UTC, Mon–Fri
     - cron: "0 3 * * 1-5"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: "Skip the NSE trading-day check (for testing only)"
+        required: false
+        default: "false"
+        type: boolean
 
 permissions:
   contents: read
@@ -27,4 +33,5 @@ jobs:
           GOOGLE_SEARCH_API_KEY: ${{ secrets.GOOGLE_SEARCH_API_KEY }}
           GOOGLE_CSE_ID: ${{ secrets.GOOGLE_CSE_ID }}
           GOOGLE_AI_DEFAULT_MODEL: gemini-2.5-pro
+          FORCE_RUN: ${{ inputs.force_run || 'false' }}
         run: uv run python -m jobs.morning_pulse
