@@ -10,6 +10,17 @@ def test_is_authorised_chat_rejects_stranger():
     assert not _is_authorised_chat(99999, "12345")
 
 
+def test_is_authorised_chat_allows_owner_dm():
+    # Group chat set as owner_chat_id; private DM uses chat_id == user_id.
+    assert _is_authorised_chat(42, "-100500", owner_user_id="42")
+    # Without the optional owner_user_id, only the group is allowed.
+    assert not _is_authorised_chat(42, "-100500")
+
+
+def test_is_authorised_chat_rejects_other_user_dm_even_with_owner_set():
+    assert not _is_authorised_chat(99, "-100500", owner_user_id="42")
+
+
 def test_extract_text_strips_leading_mention():
     msg = {
         "text": "@pravys_market_bot what should I buy?",

@@ -61,9 +61,22 @@ def _call_get_updates(bot_token: str, offset: int) -> list[dict]:
     return list(payload.get("result", []))
 
 
-def _is_authorised_chat(chat_id: int | str, owner_chat_id: str) -> bool:
-    """Authorisation: we reply in the primary chat, or any private DM."""
-    return str(chat_id) == str(owner_chat_id)
+def _is_authorised_chat(
+    chat_id: int | str,
+    owner_chat_id: str,
+    *,
+    owner_user_id: str | None = None,
+) -> bool:
+    """Allow the configured group AND a direct DM from the owner.
+
+    For private 1:1 chats Telegram uses chat_id == user_id, so setting
+    ``TELEGRAM_OWNER_USER_ID`` to the owner's user_id enables DM replies.
+    Without it, only the configured group chat is authorised.
+    """
+    target = str(chat_id)
+    if target == str(owner_chat_id):
+        return True
+    return bool(owner_user_id) and target == str(owner_user_id)
 
 
 def _extract_text(message: dict, bot_username: str | None) -> str | None:
@@ -105,6 +118,7 @@ def _handle_one(
     agent: HermesAgent,
     telegram: TelegramClient,
     owner_chat_id: str,
+    owner_user_id: str | None,
     bot_username: str | None,
     state: dict,
 ) -> None:
@@ -116,7 +130,7 @@ def _handle_one(
 
     if user.get("is_bot") or not chat_id or not user_id:
         return
-    if not _is_authorised_chat(chat_id, owner_chat_id):
+    if not _is_authorised_chat(chat_id, owner_chat_id, owner_user_id=owner_user_id):
         logger.info("ignoring message from unauthorised chat_id=%s", chat_id)
         return
 
@@ -155,6 +169,7 @@ def main() -> int:
 
     agent = HermesAgent(api_key=config.google.api_key, model=config.google.model)
     telegram = TelegramClient(config.telegram.bot_token, config.telegram.chat_id)
+    owner_user_id = os.getenv("TELEGRAM_OWNER_USER_ID")
 
     last_update_id = offset
     for update in updates:
@@ -167,6 +182,7 @@ def main() -> int:
                 agent=agent,
                 telegram=telegram,
                 owner_chat_id=config.telegram.chat_id,
+                owner_user_id=owner_user_id,
                 bot_username=bot_username,
                 state=state,
             )
