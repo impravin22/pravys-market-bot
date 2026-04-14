@@ -115,7 +115,13 @@ def _annual_eps_3y_cagr_pct(ticker) -> float | None:
         three_years_ago = float(row.iloc[3])
     except (ValueError, TypeError):
         return None
-    if three_years_ago <= 0 or pd.isna(latest) or pd.isna(three_years_ago):
+    if pd.isna(latest) or pd.isna(three_years_ago):
+        return None
+    # CAGR is only meaningful when both endpoints are positive. If either is
+    # non-positive (company lost money in one of the two periods), skip — the
+    # ratio would be negative and the fractional exponent produces a complex
+    # number in Python (e.g. `(-1) ** (1/3)` returns 0.5 + 0.87j).
+    if latest <= 0 or three_years_ago <= 0:
         return None
     try:
         cagr = (latest / three_years_ago) ** (1 / 3) - 1.0
