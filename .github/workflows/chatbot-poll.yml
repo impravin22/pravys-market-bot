@@ -1,15 +1,11 @@
-name: Chatbot Poll
+name: Chatbot Poll (DEPRECATED)
 
-# Polls Telegram for new @mentions / DMs and streams a Gemini reply back.
-# State lives in Upstash Redis; no git-branch I/O.
-#
-# Cron runs every 2 min: GitHub's scheduler is best-effort and public repos
-# routinely drop 1-min ticks under load. 2-min intervals land reliably and
-# stay well inside the Upstash 10k-commands/day free-tier budget even if
-# the owner chats constantly.
+# Replaced by the Cloudflare Worker webhook (`worker/`) which delivers
+# sub-3-second replies instead of waiting on the cron floor. This
+# workflow is kept manual-only as a fallback if the Worker is ever
+# disabled — it will still pick up queued Telegram updates via long-
+# poll if the webhook is removed via `deleteWebhook`.
 on:
-  schedule:
-    - cron: "*/2 * * * *"
   workflow_dispatch: {}
 
 concurrency:
