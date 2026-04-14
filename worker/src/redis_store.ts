@@ -54,7 +54,12 @@ export class RedisStore {
   private readonly fetchImpl: typeof fetch;
 
   constructor(private readonly config: RedisConfig) {
-    this.fetchImpl = config.fetch ?? fetch;
+    // Cloudflare Workers throws `TypeError: Illegal invocation` if native
+    // `fetch` is called off an instance property without its global `this`.
+    // Wrap in an arrow so the receiver is always the module scope, and any
+    // injected mock (e.g. tests) retains its own binding semantics.
+    const impl = config.fetch ?? fetch;
+    this.fetchImpl = (input, init) => impl(input, init);
   }
 
   private async call(...args: string[]): Promise<unknown> {

@@ -24,11 +24,14 @@ export interface TelegramUpdate {
 export class TelegramClient {
   private readonly base: string;
 
-  constructor(
-    public readonly botToken: string,
-    private readonly fetchImpl: typeof fetch = fetch,
-  ) {
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(public readonly botToken: string, fetchImpl?: typeof fetch) {
     this.base = `https://api.telegram.org/bot${botToken}`;
+    // Workers' native `fetch` throws `Illegal invocation` when called as
+    // `this.fetchImpl(...)`. Wrap so the closure carries its own scope.
+    const impl = fetchImpl ?? fetch;
+    this.fetchImpl = (input, init) => impl(input, init);
   }
 
   async sendMessage(
