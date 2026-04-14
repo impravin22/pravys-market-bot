@@ -34,7 +34,7 @@ logger = logging.getLogger("chatbot_poll")
 GET_UPDATES_TIMEOUT = 10.0
 MAX_INPUT_CHARS = 1000
 STATE_PATH = Path(os.getenv("CHATBOT_STATE_PATH", "state/chatbot_state.json"))
-PLAYBOOK_PATH = Path(os.getenv("CANSLIM_PLAYBOOK_PATH", "TheCAN-SLIM®-Playbook.pdf"))
+PLAYBOOK_PATH = Path(os.getenv("CANSLIM_PLAYBOOK_PATH", "canslim-playbook.pdf"))
 
 
 def _call_get_updates(bot_token: str, offset: int) -> list[dict]:
