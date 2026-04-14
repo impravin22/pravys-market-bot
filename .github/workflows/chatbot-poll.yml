@@ -1,46 +1,32 @@
 name: Chatbot Poll
 
-# Polls Telegram every 5 min for new @mentions / DMs, answers them via the
-# Gemini-powered Hermes-style agent, and persists the offset on a dedicated
-# `chatbot-state` branch so the next run doesn't reprocess old messages.
+# Polls Telegram for new @mentions / DMs and streams a Gemini reply back.
+# State lives in Upstash Redis; no git-branch I/O.
+#
+# Cron runs every 2 min: GitHub's scheduler is best-effort and public repos
+# routinely drop 1-min ticks under load. 2-min intervals land reliably and
+# stay well inside the Upstash 10k-commands/day free-tier budget even if
+# the owner chats constantly.
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/2 * * * *"
   workflow_dispatch: {}
 
-# Single run at a time. If the previous run is still going, skip this tick
-# rather than process the same update twice.
 concurrency:
   group: chatbot-poll
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   poll:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      # Load persisted state from the dedicated branch into ./state/.
-      # If the branch doesn't exist yet, start from an empty state.
-      - name: Load chatbot state
-        id: load_state
-        run: |
-          set -euo pipefail
-          mkdir -p state
-          if git ls-remote --exit-code --heads origin chatbot-state; then
-            git fetch origin chatbot-state:chatbot-state
-            git checkout chatbot-state -- state/chatbot_state.json || echo "{}" > state/chatbot_state.json
-          else
-            echo '{"telegram_offset": 0, "rate_limit": {}, "last_run_at": null}' > state/chatbot_state.json
-            echo "init=true" >> "$GITHUB_OUTPUT"
-          fi
-          cat state/chatbot_state.json
 
       - uses: astral-sh/setup-uv@v6
         with:
@@ -57,37 +43,9 @@ jobs:
           GOOGLE_SEARCH_API_KEY: ${{ secrets.GOOGLE_SEARCH_API_KEY }}
           GOOGLE_CSE_ID: ${{ secrets.GOOGLE_CSE_ID }}
           GOOGLE_AI_DEFAULT_MODEL: gemini-2.5-pro
-          CHATBOT_STATE_PATH: state/chatbot_state.json
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          BOT_USER_ID_SALT: ${{ secrets.BOT_USER_ID_SALT }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          LOGFIRE_TOKEN: ${{ secrets.LOGFIRE_TOKEN }}
         run: uv run python -m jobs.chatbot_poll
-
-      # Commit the updated state back to `chatbot-state` (never to main).
-      - name: Persist chatbot state
-        if: always()
-        run: |
-          set -euo pipefail
-          if [ ! -f state/chatbot_state.json ]; then
-            echo "state file missing after run — nothing to commit"
-            exit 0
-          fi
-          # Work in a dedicated worktree for the state branch so our main
-          # checkout stays clean.
-          rm -rf .state-branch
-          if git ls-remote --exit-code --heads origin chatbot-state; then
-            git fetch origin chatbot-state:chatbot-state
-            git worktree add .state-branch chatbot-state
-          else
-            git worktree add --orphan .state-branch -b chatbot-state
-            rm -rf .state-branch/*
-          fi
-          mkdir -p .state-branch/state
-          cp state/chatbot_state.json .state-branch/state/chatbot_state.json
-          cd .state-branch
-          git config user.email "chatbot-state@users.noreply.github.com"
-          git config user.name "pravys-market-bot state"
-          git add state/chatbot_state.json
-          if git diff --cached --quiet; then
-            echo "state unchanged — skip commit"
-          else
-            git commit -m "chore(state): update chatbot offset at $(date -u +%FT%TZ)"
-            git push origin chatbot-state
-          fi

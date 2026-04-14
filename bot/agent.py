@@ -114,6 +114,26 @@ GEMINI_RETRY_ATTEMPTS = 3
 GEMINI_RETRY_BACKOFF_SECONDS = (1.5, 3.0)
 
 
+def _normalise_history_role(role: object) -> str | None:
+    """Map a stored history role to Gemini's accepted set.
+
+    Gemini only accepts ``"user"`` and ``"model"``. An OpenAI-flavoured
+    ``"assistant"`` turn is treated as ``"model"``; ``"system"`` turns are
+    dropped (they would duplicate the system_instruction). Anything else
+    returns ``None`` so the caller skips the turn.
+    """
+    if not isinstance(role, str):
+        return "user"
+    normalised = role.strip().lower()
+    if normalised in {"user", ""}:
+        return "user"
+    if normalised in {"model", "assistant", "bot"}:
+        return "model"
+    if normalised == "system":
+        return None
+    return None
+
+
 def _is_retryable_gemini_error(exc: Exception) -> bool:
     msg = str(exc).lower()
     if "503" in msg and ("unavailable" in msg or "overloaded" in msg or "demand" in msg):
@@ -159,14 +179,44 @@ class HermesAgent:
             self._playbook_file = None
         return self._playbook_file
 
-    def stream_reply(self, user_message: str) -> Iterable[str]:
+    def stream_reply(
+        self,
+        user_message: str,
+        *,
+        history: list[dict[str, str]] | None = None,
+    ) -> Iterable[str]:
         """Yield non-empty text chunks as Gemini produces them.
 
-        The caller decides whether to concatenate (for logs) or edit an open
-        Telegram message (for streaming UX).
+        Args:
+            user_message: the current turn's user text.
+            history: optional list of prior turns in the form
+                ``[{"role": "user" | "model", "text": "…"}, …]``. Fed into
+                Gemini as multi-turn context so the bot remembers greetings,
+                follow-up questions, and ticker references from earlier
+                messages.
+
+        The caller decides whether to concatenate the chunks (for logs) or
+        edit an open Telegram message (for streaming UX).
         """
         playbook = self._ensure_playbook()
-        contents: list[object] = [user_message]
+        contents: list[object] = []
+        for turn in history or []:
+            role = _normalise_history_role(turn.get("role"))
+            if role is None:
+                continue
+            text = turn.get("text") or ""
+            if not text:
+                continue
+            try:
+                contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
+            except (ValueError, TypeError) as exc:
+                logger.warning(
+                    "dropping malformed history turn role=%r len=%d: %s",
+                    role,
+                    len(text),
+                    exc,
+                )
+        contents.append(user_message)
         if playbook is not None:
             contents.append(playbook)
 

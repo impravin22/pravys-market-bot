@@ -2,15 +2,21 @@
 
 Each cron tick:
 
-1. Load persisted offset from ``state/chatbot_state.json``.
-2. ``getUpdates`` for anything since the previous ack.
-3. For each eligible message (authorised chat, non-bot, non-empty text,
-   inside length cap, not rate-limited), send a placeholder reply, then
-   stream Gemini chunks into it via ``editMessageText``.
-4. Persist the new offset.
+1. Init Sentry + Logfire if their env vars are set.
+2. Load persisted offset from Upstash Redis.
+3. ``getUpdates`` for anything since the previous ack.
+4. For each eligible message:
+   - Authorised chat only (group or owner DM).
+   - Length-capped, not rate-limited, not from a bot.
+   - Pull the last N turns of chat history from Redis and thread them
+     into the Gemini call so the bot remembers prior context.
+   - Stream the reply via ``editMessageText`` as Gemini produces chunks.
+   - Append the (user, model) pair back to history.
+5. Persist the new offset.
 
-State design intentionally omits user_ids — the ``chatbot-state`` branch
-stays PII-free.
+State lives exclusively in Upstash Redis — no git-branch writes — so the
+bot has no PII in public git history and state survives runner
+ephemerality.
 """
 
 from __future__ import annotations
@@ -23,7 +29,8 @@ from pathlib import Path
 import httpx
 
 from bot.agent import HermesAgent
-from bot.state import RateLimiter, load_state, save_state
+from bot.observability import capture_exception, init_logfire, init_sentry
+from bot.redis_store import RATE_LIMIT_TTL_SECONDS, RedisConfig, RedisStore
 from bot.streaming import TelegramStream
 from core.config import load_config
 from core.telegram_client import TelegramClient
@@ -33,7 +40,6 @@ logger = logging.getLogger("chatbot_poll")
 
 GET_UPDATES_TIMEOUT = 10.0
 MAX_INPUT_CHARS = 1000
-STATE_PATH = Path(os.getenv("CHATBOT_STATE_PATH", "state/chatbot_state.json"))
 PLAYBOOK_PATH = Path(os.getenv("CANSLIM_PLAYBOOK_PATH", "canslim-playbook.pdf"))
 
 
@@ -120,7 +126,7 @@ def _handle_one(
     owner_chat_id: str,
     owner_user_id: str | None,
     bot_username: str | None,
-    rate_limiter: RateLimiter,
+    store: RedisStore,
 ) -> None:
     message = update.get("message") or {}
     chat = message.get("chat") or {}
@@ -146,35 +152,90 @@ def _handle_one(
         )
         return
 
-    if rate_limiter.is_limited(user_id):
-        logger.info("rate-limiting user_id=%s", user_id)
+    if store.is_rate_limited(user_id, seconds=RATE_LIMIT_TTL_SECONDS):
+        logger.info("rate-limiting user_id=(hashed)")
         return
-    rate_limiter.mark(user_id)
+    store.mark_user(user_id)
 
-    logger.info("streaming reply to user_id=%s text=%r", user_id, text[:80])
+    logger.info("streaming reply chat_id=%s text_len=%d", chat_id, len(text))
+    try:
+        history = store.get_history(chat_id)
+    except Exception as exc:  # noqa: BLE001 — history is optional context
+        logger.warning("history fetch failed (continuing without): %s", exc)
+        capture_exception(
+            exc,
+            update_id=str(update.get("update_id")),
+            stage="history_fetch",
+        )
+        history = []
+
     stream = TelegramStream(
         bot_token=telegram.bot_token,
         chat_id=chat_id,
         http_client=telegram._client,  # noqa: SLF001
     )
+
     try:
-        final = stream.stream(agent.stream_reply(text))
-        logger.info("reply-sent chars=%d", len(final))
-    except Exception:
-        rate_limiter.unmark(user_id)
+        final = stream.stream(agent.stream_reply(text, history=history))
+    except Exception as exc:
+        # Reply never landed. Release the rate-limit slot so the user can
+        # retry without waiting, and surface the error. `unmark_user` has
+        # its own failure path wrapped so an Upstash outage doesn't mask
+        # the original exception.
+        try:
+            store.unmark_user(user_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("unmark_user failed during stream-error recovery", exc_info=True)
+        capture_exception(
+            exc,
+            update_id=str(update.get("update_id")),
+            chat_kind=str(chat.get("type") or "unknown"),
+            stage="stream",
+        )
         raise
+
+    logger.info("reply-sent chars=%d", len(final))
+
+    # Reply already went out. A persistence failure here doesn't break the
+    # user's experience — they saw the reply — but it costs us conversation
+    # memory for the next turn, so flag it loudly.
+    try:
+        store.append_turn(chat_id, text, final)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "history persist failed chat_id=%s update_id=%s — next turn loses context: %s",
+            chat_id,
+            update.get("update_id"),
+            exc,
+        )
+        capture_exception(
+            exc,
+            update_id=str(update.get("update_id")),
+            chat_kind=str(chat.get("type") or "unknown"),
+            stage="persist_history",
+        )
 
 
 def main() -> int:
+    init_sentry()
+    init_logfire()
+
     config = load_config()
-    state = load_state(STATE_PATH)
-    offset = int(state.get("telegram_offset") or 0)
+    redis_config = RedisConfig.from_env()
+    if redis_config is None:
+        logger.error(
+            "Redis env vars missing — set UPSTASH_REDIS_REST_URL, "
+            "UPSTASH_REDIS_REST_TOKEN, and BOT_USER_ID_SALT."
+        )
+        return 1
+    store = RedisStore(redis_config)
+
+    offset = store.get_offset()
 
     bot_username = _bot_username(config.telegram.bot_token)
     updates = _call_get_updates(config.telegram.bot_token, offset)
     if not updates:
         logger.info("no new updates (offset=%d)", offset)
-        save_state(state, STATE_PATH)
         return 0
 
     agent = HermesAgent(
@@ -184,7 +245,6 @@ def main() -> int:
     )
     telegram = TelegramClient(config.telegram.bot_token, config.telegram.chat_id)
     owner_user_id = os.getenv("TELEGRAM_OWNER_USER_ID")
-    rate_limiter = RateLimiter()
 
     last_update_id = offset
     for update in updates:
@@ -199,15 +259,14 @@ def main() -> int:
                 owner_chat_id=config.telegram.chat_id,
                 owner_user_id=owner_user_id,
                 bot_username=bot_username,
-                rate_limiter=rate_limiter,
+                store=store,
             )
         except Exception as exc:  # noqa: BLE001 — never let one bad message kill the batch
             logger.exception("handler failed for update_id=%s: %s", update_id, exc)
 
-    state["telegram_offset"] = last_update_id + 1
-    save_state(state, STATE_PATH)
+    store.set_offset(last_update_id + 1)
     logger.info(
-        "chatbot-poll done | processed=%d | next_offset=%d", len(updates), state["telegram_offset"]
+        "chatbot-poll done | processed=%d | next_offset=%d", len(updates), last_update_id + 1
     )
     return 0
 

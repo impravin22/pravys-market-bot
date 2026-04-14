@@ -2,7 +2,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from bot.state import RateLimiter
 from jobs.chatbot_poll import (
     MAX_INPUT_CHARS,
     _extract_text,
@@ -122,10 +121,34 @@ def _fake_telegram() -> MagicMock:
     return telegram
 
 
-def test_handle_one_streams_reply_via_telegram_stream(monkeypatch):
+class _FakeStore:
+    def __init__(self, *, rate_limited: bool = False, history: list[dict] | None = None):
+        self.rate_limited = rate_limited
+        self.history = history or []
+        self.marks: list[int | str] = []
+        self.unmarks: list[int | str] = []
+        self.turns: list[tuple[int | str, str, str]] = []
+
+    def is_rate_limited(self, user_id, *, seconds):
+        return self.rate_limited
+
+    def mark_user(self, user_id):
+        self.marks.append(user_id)
+
+    def unmark_user(self, user_id):
+        self.unmarks.append(user_id)
+
+    def get_history(self, chat_id):
+        return list(self.history)
+
+    def append_turn(self, chat_id, user_text, bot_text):
+        self.turns.append((chat_id, user_text, bot_text))
+
+
+def test_handle_one_streams_reply_and_appends_history(monkeypatch):
     _attach_fake_stream(monkeypatch)
     agent = _fake_agent(["Hello ", "world"])
-    rl = RateLimiter()
+    store = _FakeStore()
     _handle_one(
         _make_update("hi"),
         agent=agent,
@@ -133,19 +156,44 @@ def test_handle_one_streams_reply_via_telegram_stream(monkeypatch):
         owner_chat_id="-100500",
         owner_user_id=None,
         bot_username="pravys_market_bot",
-        rate_limiter=rl,
+        store=store,
     )
-    assert len(_FakeStream.instances) == 1
-    assert _FakeStream.instances[0].chunks_seen == ["Hello ", "world"]
-    agent.stream_reply.assert_called_once_with("hi")
-    assert rl.is_limited(42)
+    agent.stream_reply.assert_called_once()
+    call_args = agent.stream_reply.call_args
+    assert call_args.args[0] == "hi"
+    assert call_args.kwargs.get("history") == []
+    assert store.marks == [42]
+    assert store.turns == [(-100500, "hi", "Hello world")]
+
+
+def test_handle_one_threads_prior_history_into_agent(monkeypatch):
+    _attach_fake_stream(monkeypatch)
+    agent = _fake_agent(["ok"])
+    store = _FakeStore(
+        history=[
+            {"role": "user", "text": "you alright?"},
+            {"role": "model", "text": "all good mate, what's on your mind?"},
+        ]
+    )
+    _handle_one(
+        _make_update("what about PFC?"),
+        agent=agent,
+        telegram=_fake_telegram(),
+        owner_chat_id="-100500",
+        owner_user_id=None,
+        bot_username="pravys_market_bot",
+        store=store,
+    )
+    assert agent.stream_reply.call_args.kwargs["history"] == [
+        {"role": "user", "text": "you alright?"},
+        {"role": "model", "text": "all good mate, what's on your mind?"},
+    ]
 
 
 def test_handle_one_skips_agent_when_rate_limited(monkeypatch):
     _attach_fake_stream(monkeypatch)
     agent = _fake_agent(["ignored"])
-    rl = RateLimiter()
-    rl.mark(42)
+    store = _FakeStore(rate_limited=True)
     _handle_one(
         _make_update("hi"),
         agent=agent,
@@ -153,15 +201,16 @@ def test_handle_one_skips_agent_when_rate_limited(monkeypatch):
         owner_chat_id="-100500",
         owner_user_id=None,
         bot_username="pravys_market_bot",
-        rate_limiter=rl,
+        store=store,
     )
     agent.stream_reply.assert_not_called()
-    assert _FakeStream.instances == []
+    assert store.marks == []
 
 
 def test_handle_one_ignores_unauthorised_chat(monkeypatch):
     _attach_fake_stream(monkeypatch)
     agent = _fake_agent(["ignored"])
+    store = _FakeStore()
     _handle_one(
         _make_update("hi", chat_id=999999),
         agent=agent,
@@ -169,7 +218,7 @@ def test_handle_one_ignores_unauthorised_chat(monkeypatch):
         owner_chat_id="-100500",
         owner_user_id=None,
         bot_username="pravys_market_bot",
-        rate_limiter=RateLimiter(),
+        store=store,
     )
     agent.stream_reply.assert_not_called()
 
@@ -177,6 +226,7 @@ def test_handle_one_ignores_unauthorised_chat(monkeypatch):
 def test_handle_one_ignores_bot_messages(monkeypatch):
     _attach_fake_stream(monkeypatch)
     agent = _fake_agent(["ignored"])
+    store = _FakeStore()
     upd = _make_update("from another bot")
     upd["message"]["from"]["is_bot"] = True
     _handle_one(
@@ -186,7 +236,7 @@ def test_handle_one_ignores_bot_messages(monkeypatch):
         owner_chat_id="-100500",
         owner_user_id=None,
         bot_username="pravys_market_bot",
-        rate_limiter=RateLimiter(),
+        store=store,
     )
     agent.stream_reply.assert_not_called()
 
@@ -194,6 +244,7 @@ def test_handle_one_ignores_bot_messages(monkeypatch):
 def test_handle_one_ignores_missing_text(monkeypatch):
     _attach_fake_stream(monkeypatch)
     agent = _fake_agent(["ignored"])
+    store = _FakeStore()
     update = {
         "update_id": 1,
         "message": {
@@ -209,12 +260,12 @@ def test_handle_one_ignores_missing_text(monkeypatch):
         owner_chat_id="-100500",
         owner_user_id=None,
         bot_username="pravys_market_bot",
-        rate_limiter=RateLimiter(),
+        store=store,
     )
     agent.stream_reply.assert_not_called()
 
 
-def test_handle_one_rejects_long_input_without_agent_call(monkeypatch):
+def test_handle_one_rejects_long_input(monkeypatch):
     _attach_fake_stream(monkeypatch)
     sent_direct: list[tuple] = []
 
@@ -227,7 +278,7 @@ def test_handle_one_rejects_long_input_without_agent_call(monkeypatch):
 
     monkeypatch.setattr("jobs.chatbot_poll.TelegramClient", DummyDirect)
     agent = _fake_agent(["ignored"])
-    rl = RateLimiter()
+    store = _FakeStore()
     _handle_one(
         _make_update("x" * (MAX_INPUT_CHARS + 10)),
         agent=agent,
@@ -235,13 +286,13 @@ def test_handle_one_rejects_long_input_without_agent_call(monkeypatch):
         owner_chat_id="-100500",
         owner_user_id=None,
         bot_username="pravys_market_bot",
-        rate_limiter=rl,
+        store=store,
     )
     agent.stream_reply.assert_not_called()
     assert len(sent_direct) == 1
-    assert sent_direct[0][1] is None  # plain text
+    assert sent_direct[0][1] is None
     assert str(MAX_INPUT_CHARS) in sent_direct[0][0]
-    assert not rl.is_limited(42)
+    assert store.marks == []
 
 
 def test_handle_one_unmarks_rate_limit_on_stream_failure(monkeypatch):
@@ -250,13 +301,12 @@ def test_handle_one_unmarks_rate_limit_on_stream_failure(monkeypatch):
             pass
 
         def stream(self, chunks):
-            # Consume so the iterator closes cleanly.
             list(chunks)
             raise RuntimeError("edit failed")
 
     monkeypatch.setattr("jobs.chatbot_poll.TelegramStream", FailingStream)
     agent = _fake_agent(["hello"])
-    rl = RateLimiter()
+    store = _FakeStore()
     with pytest.raises(RuntimeError):
         _handle_one(
             _make_update("hi"),
@@ -265,6 +315,88 @@ def test_handle_one_unmarks_rate_limit_on_stream_failure(monkeypatch):
             owner_chat_id="-100500",
             owner_user_id=None,
             bot_username="pravys_market_bot",
-            rate_limiter=rl,
+            store=store,
         )
-    assert not rl.is_limited(42)
+    assert store.unmarks == [42]
+    assert store.turns == []
+
+
+def test_handle_one_append_turn_failure_keeps_reply_and_rate_limit(monkeypatch):
+    """If Upstash flakes AFTER the reply lands, the user still sees it and
+    stays rate-limited — append_turn failure must not re-throw or unmark."""
+    _attach_fake_stream(monkeypatch)
+    agent = _fake_agent(["ok mate"])
+
+    class FlakyStore(_FakeStore):
+        def append_turn(self, chat_id, user_text, bot_text):
+            raise RuntimeError("Upstash SET failed")
+
+    store = FlakyStore()
+    # Does NOT raise — reply already went out.
+    _handle_one(
+        _make_update("hi"),
+        agent=agent,
+        telegram=_fake_telegram(),
+        owner_chat_id="-100500",
+        owner_user_id=None,
+        bot_username="pravys_market_bot",
+        store=store,
+    )
+    # User saw the reply, so they stay rate-limited.
+    assert store.marks == [42]
+    assert store.unmarks == []
+
+
+def test_handle_one_history_fetch_failure_falls_back_to_empty(monkeypatch):
+    """Redis outage on history fetch must not kill the reply."""
+    _attach_fake_stream(monkeypatch)
+    agent = _fake_agent(["ok"])
+
+    class HistoryFailStore(_FakeStore):
+        def get_history(self, chat_id):
+            raise RuntimeError("Upstash GET timed out")
+
+    store = HistoryFailStore()
+    _handle_one(
+        _make_update("hi"),
+        agent=agent,
+        telegram=_fake_telegram(),
+        owner_chat_id="-100500",
+        owner_user_id=None,
+        bot_username="pravys_market_bot",
+        store=store,
+    )
+    # Agent still called — with empty history as the fallback.
+    agent.stream_reply.assert_called_once()
+    assert agent.stream_reply.call_args.kwargs["history"] == []
+
+
+def test_handle_one_unmark_failure_does_not_mask_stream_error(monkeypatch):
+    """If Upstash is down AND the stream fails, the original stream error must propagate."""
+
+    class FailingStream:
+        def __init__(self, **kwargs):
+            pass
+
+        def stream(self, chunks):
+            list(chunks)
+            raise RuntimeError("original stream error")
+
+    monkeypatch.setattr("jobs.chatbot_poll.TelegramStream", FailingStream)
+
+    class BothFlakyStore(_FakeStore):
+        def unmark_user(self, user_id):
+            raise RuntimeError("Upstash also down")
+
+    agent = _fake_agent(["hello"])
+    store = BothFlakyStore()
+    with pytest.raises(RuntimeError, match="original stream error"):
+        _handle_one(
+            _make_update("hi"),
+            agent=agent,
+            telegram=_fake_telegram(),
+            owner_chat_id="-100500",
+            owner_user_id=None,
+            bot_username="pravys_market_bot",
+            store=store,
+        )
