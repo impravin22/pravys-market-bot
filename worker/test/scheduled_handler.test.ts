@@ -50,7 +50,7 @@ describe("worker.scheduled", () => {
       .mockResolvedValue(new Response(null, { status: 204 }));
     const { ctx, pending } = fakeCtx();
 
-    await worker.scheduled!(fakeScheduled("0 3 * * 2-6"), fakeEnv(), ctx);
+    await worker.scheduled!(fakeScheduled("5 23 * * *"), fakeEnv(), ctx);
     await Promise.all(pending);
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -105,7 +105,7 @@ describe("worker.scheduled", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const { ctx, pending } = fakeCtx();
 
-    await worker.scheduled!(fakeScheduled("0 3 * * 2-6"), fakeEnv(), ctx);
+    await worker.scheduled!(fakeScheduled("5 23 * * *"), fakeEnv(), ctx);
     await expect(Promise.all(pending)).rejects.toThrow(/dispatch failed: 401/);
   });
 
@@ -116,7 +116,7 @@ describe("worker.scheduled", () => {
     const { ctx, pending } = fakeCtx();
 
     await worker.scheduled!(
-      fakeScheduled("0 3 * * 2-6"),
+      fakeScheduled("5 23 * * *"),
       fakeEnv({ GITHUB_REF: "feat/branch" }),
       ctx,
     );
