@@ -62,6 +62,7 @@ const CRON_TO_WORKFLOW: Readonly<Record<string, string>> = Object.freeze({
   "0 3 * * 2-6": "market-pulse-morning.yml",
   "15 10 * * 2-6": "market-pulse-evening.yml",
   "0 14 * * 1": "weekly-top3.yml",
+  "20 6 * * *": "market-pulse-morning.yml",  // TEMP SMOKE — remove with the wrangler.toml entry
 });
 
 const MAX_INPUT_CHARS = 1000;
