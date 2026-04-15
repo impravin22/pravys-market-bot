@@ -30,5 +30,5 @@ GITHUB_REF = "main"
 crons = [
   "0 3 * * 1-5",     # Morning pulse — 03:00 UTC = 08:30 IST / 11:00 TPE, Mon–Fri
   "15 10 * * 1-5",   # Evening recap — 10:15 UTC = 15:45 IST / 18:15 TPE, Mon–Fri
-  "0 14 * * 0",      # Weekly Top 3 — 14:00 UTC = 22:00 TPE, Sunday
+  "0 14 * * 7",      # Weekly Top 3 — 14:00 UTC = 22:00 TPE, Sunday (CF uses 1-7, not 0-6)
 ]

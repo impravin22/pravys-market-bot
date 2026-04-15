@@ -79,7 +79,7 @@ describe("worker.scheduled", () => {
       .mockResolvedValue(new Response(null, { status: 204 }));
     const { ctx, pending } = fakeCtx();
 
-    await worker.scheduled!(fakeScheduled("0 14 * * 0"), fakeEnv(), ctx);
+    await worker.scheduled!(fakeScheduled("0 14 * * 7"), fakeEnv(), ctx);
     await Promise.all(pending);
 
     const [url] = fetchSpy.mock.calls[0] as [string];
