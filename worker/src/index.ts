@@ -25,6 +25,7 @@
  */
 
 import { HermesAgent } from "./agent";
+import { dispatchWorkflow } from "./github";
 import { RedisStore } from "./redis_store";
 import { TelegramStream } from "./streaming";
 import type { TelegramMessage, TelegramUpdate } from "./telegram";
@@ -41,7 +42,27 @@ export interface Env {
   BOT_USER_ID_SALT: string;
   GOOGLE_AI_DEFAULT_MODEL: string;
   CANSLIM_PLAYBOOK_FILE_ID: string;
+  /** `owner/repo` for the GitHub Actions workflows the scheduled handler dispatches. */
+  GITHUB_REPO: string;
+  /** Ref to dispatch against. Defaults to `main` when unset. */
+  GITHUB_REF?: string;
+  /** Fine-grained PAT with `actions:write` on {@link Env.GITHUB_REPO}. */
+  GITHUB_DISPATCH_TOKEN: string;
 }
+
+/**
+ * Cron expression → GitHub Actions workflow filename.
+ *
+ * Cloudflare fires `scheduled()` with the exact cron string from
+ * `wrangler.toml`, so we match on the string itself. Keep this table in
+ * sync with `wrangler.toml` `[triggers].crons` and the workflow filenames
+ * in `.github/workflows/`.
+ */
+const CRON_TO_WORKFLOW: Readonly<Record<string, string>> = Object.freeze({
+  "0 3 * * 1-5": "market-pulse-morning.yml",
+  "15 10 * * 1-5": "market-pulse-evening.yml",
+  "0 14 * * 0": "weekly-top3.yml",
+});
 
 const MAX_INPUT_CHARS = 1000;
 const RATE_LIMIT_SECONDS = 30;
@@ -215,5 +236,42 @@ export default {
       }),
     );
     return new Response("ok", { status: 200 });
+  },
+
+  /**
+   * Cloudflare cron trigger. Fires at the exact times listed under
+   * `[triggers].crons` in `wrangler.toml`. We use CF cron (<1 min drift)
+   * to dispatch GitHub Actions workflows instead of GitHub's native
+   * scheduled trigger, which routinely runs 15–60 min late at top-of-hour.
+   *
+   * Any error here must surface in Worker logs — we intentionally DO NOT
+   * swallow dispatch failures, because a silent failure means no Telegram
+   * digest and no user-visible signal.
+   */
+  async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    const workflow = CRON_TO_WORKFLOW[event.cron];
+    if (!workflow) {
+      // Throw (don't just log-and-return) so Cloudflare marks the
+      // scheduled invocation as failed. A silent return would show as
+      // green in the dashboard even though no workflow fired.
+      throw new Error(`scheduled: no workflow mapped for cron "${event.cron}"`);
+    }
+    ctx.waitUntil(
+      dispatchWorkflow({
+        repo: env.GITHUB_REPO,
+        workflow,
+        ref: env.GITHUB_REF ?? "main",
+        token: env.GITHUB_DISPATCH_TOKEN,
+      }).then(
+        () => console.info("scheduled: dispatched", workflow, "for cron", event.cron),
+        (exc: unknown) => {
+          // Re-throw so Cloudflare marks the scheduled run as failed, which
+          // surfaces in the Worker's Logs tab and triggers any alerting
+          // wired on top of it.
+          console.error("scheduled: dispatch failed", workflow, exc);
+          throw exc;
+        },
+      ),
+    );
   },
 } satisfies ExportedHandler<Env>;

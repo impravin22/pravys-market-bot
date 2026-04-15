@@ -14,3 +14,21 @@ GOOGLE_AI_DEFAULT_MODEL = "gemini-2.5-pro"
 # CAN SLIM playbook URI from Gemini Files API. Re-upload via
 # `scripts/upload_playbook.py` if Gemini reports it expired.
 CANSLIM_PLAYBOOK_FILE_ID = "https://generativelanguage.googleapis.com/v1beta/files/b68ifevz15qk"
+# Which repo the scheduled handler dispatches workflows against.
+GITHUB_REPO = "impravin22/pravys-market-bot"
+GITHUB_REF = "main"
+
+# Cron triggers drive the scheduled() handler, which dispatches the
+# equivalent GitHub Actions workflow via workflow_dispatch. Keep the
+# expressions in sync with CRON_TO_WORKFLOW in src/index.ts.
+#
+# Why CF cron instead of GitHub's native schedule: GitHub cron routinely
+# runs 15–60 min late at top-of-hour (e.g. evening-pulse 2026-04-14 fired
+# at 11:19 UTC for a 10:15 UTC cron — 64 min late). Cloudflare cron is
+# sub-minute accurate, so pre-market / post-close timing is reliable.
+[triggers]
+crons = [
+  "0 3 * * 1-5",     # Morning pulse — 03:00 UTC = 08:30 IST / 11:00 TPE, Mon–Fri
+  "15 10 * * 1-5",   # Evening recap — 10:15 UTC = 15:45 IST / 18:15 TPE, Mon–Fri
+  "0 14 * * 0",      # Weekly Top 3 — 14:00 UTC = 22:00 TPE, Sunday
+]

@@ -1,9 +1,10 @@
 name: Market Pulse — Morning
 
+# Triggered by the Cloudflare Worker's scheduled() handler at 03:00 UTC
+# Mon-Fri (08:30 IST / 11:00 TPE). CF cron is sub-minute accurate; GitHub's
+# native schedule routinely ran 15-60 min late at top-of-hour, which is
+# unacceptable for pre-market delivery. See worker/src/index.ts.
 on:
-  schedule:
-    # 11:00 Asia/Taipei = 08:30 Asia/Kolkata = 03:00 UTC, Mon–Fri
-    - cron: "0 3 * * 1-5"
   workflow_dispatch:
     inputs:
       force_run:
