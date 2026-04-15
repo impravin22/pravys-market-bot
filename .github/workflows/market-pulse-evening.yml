@@ -1,9 +1,9 @@
 name: Market Pulse — Evening
 
+# Triggered by the Cloudflare Worker's scheduled() handler at 10:15 UTC
+# Mon-Fri (15:45 IST / 18:15 TPE, 15 min after NSE close). See
+# worker/src/index.ts for why we moved off GitHub's native cron.
 on:
-  schedule:
-    # 18:15 Asia/Taipei = 15:45 Asia/Kolkata (15 min after NSE close) = 10:15 UTC, Mon–Fri
-    - cron: "15 10 * * 1-5"
   workflow_dispatch: {}
 
 permissions:

@@ -13,6 +13,9 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
     BOT_USER_ID_SALT: "salt",
     GOOGLE_AI_DEFAULT_MODEL: "gemini-2.5-pro",
     CANSLIM_PLAYBOOK_FILE_ID: "",
+    GITHUB_REPO: "impravin22/pravys-market-bot",
+    GITHUB_REF: "main",
+    GITHUB_DISPATCH_TOKEN: "ghp_test",
     ...overrides,
   };
 }
