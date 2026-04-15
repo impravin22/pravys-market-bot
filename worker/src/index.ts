@@ -59,7 +59,7 @@ export interface Env {
  * in `.github/workflows/`.
  */
 const CRON_TO_WORKFLOW: Readonly<Record<string, string>> = Object.freeze({
-  "0 3 * * 2-6": "market-pulse-morning.yml",
+  "5 23 * * *": "market-pulse-morning.yml",
   "15 10 * * 2-6": "market-pulse-evening.yml",
   "0 14 * * 1": "weekly-top3.yml",
 });
