@@ -15,6 +15,12 @@ function fakeFetch(response: Response): { fn: typeof fetch; calls: FetchCall[] }
   return { fn, calls };
 }
 
+function headerValue(init: RequestInit, name: string): string | null {
+  // Go through Headers (rather than casting to Record<string,string>) so the
+  // assertion survives if the implementation ever passes a Headers object.
+  return new Headers(init.headers).get(name);
+}
+
 describe("dispatchWorkflow", () => {
   it("POSTs to the workflow_dispatch endpoint with ref and auth", async () => {
     const { fn, calls } = fakeFetch(new Response(null, { status: 204 }));
@@ -23,6 +29,7 @@ describe("dispatchWorkflow", () => {
       workflow: "market-pulse-morning.yml",
       token: "ghp_xxx",
       fetchImpl: fn,
+      timeoutMs: 0,
     });
 
     expect(calls).toHaveLength(1);
@@ -32,11 +39,10 @@ describe("dispatchWorkflow", () => {
     );
     expect(call.init.method).toBe("POST");
 
-    const headers = call.init.headers as Record<string, string>;
-    expect(headers.Authorization).toBe("Bearer ghp_xxx");
-    expect(headers.Accept).toBe("application/vnd.github+json");
-    expect(headers["X-GitHub-Api-Version"]).toBe("2022-11-28");
-    expect(headers["User-Agent"]).toBe("pravys-market-bot-worker");
+    expect(headerValue(call.init, "Authorization")).toBe("Bearer ghp_xxx");
+    expect(headerValue(call.init, "Accept")).toBe("application/vnd.github+json");
+    expect(headerValue(call.init, "X-GitHub-Api-Version")).toBe("2022-11-28");
+    expect(headerValue(call.init, "User-Agent")).toBe("pravys-market-bot-worker");
 
     expect(JSON.parse(call.init.body as string)).toEqual({ ref: "main" });
   });
@@ -49,28 +55,23 @@ describe("dispatchWorkflow", () => {
       ref: "feat/branch",
       token: "t",
       fetchImpl: fn,
+      timeoutMs: 0,
     });
     expect(JSON.parse(calls[0].init.body as string)).toEqual({ ref: "feat/branch" });
   });
 
-  it("throws DispatchError with status + body on non-204 responses", async () => {
-    const { fn } = fakeFetch(
-      new Response('{"message":"Not Found"}', {
-        status: 404,
-        statusText: "Not Found",
-      }),
-    );
-
+  it.each([
+    { status: 401, statusText: "Unauthorized", body: '{"message":"Bad credentials"}' },
+    { status: 404, statusText: "Not Found", body: '{"message":"Not Found"}' },
+    { status: 422, statusText: "Unprocessable Entity", body: '{"message":"No ref found"}' },
+    { status: 500, statusText: "Server Error", body: "oops" },
+  ])("throws DispatchError with status $status for GitHub error responses", async ({ status, statusText, body }) => {
+    const { fn } = fakeFetch(new Response(body, { status, statusText }));
     await expect(
-      dispatchWorkflow({
-        repo: "o/r",
-        workflow: "x.yml",
-        token: "t",
-        fetchImpl: fn,
-      }),
+      dispatchWorkflow({ repo: "o/r", workflow: "x.yml", token: "t", fetchImpl: fn, timeoutMs: 0 }),
     ).rejects.toMatchObject({
       name: "DispatchError",
-      status: 404,
+      status,
     });
   });
 
@@ -78,20 +79,31 @@ describe("dispatchWorkflow", () => {
     const big = "x".repeat(2000);
     const { fn } = fakeFetch(new Response(big, { status: 500, statusText: "Err" }));
     try {
-      await dispatchWorkflow({ repo: "o/r", workflow: "x.yml", token: "t", fetchImpl: fn });
+      await dispatchWorkflow({ repo: "o/r", workflow: "x.yml", token: "t", fetchImpl: fn, timeoutMs: 0 });
       expect.unreachable("should have thrown");
     } catch (exc) {
       expect(exc).toBeInstanceOf(DispatchError);
-      // 500 body chars + ellipsis ≪ original 2000 chars
       expect((exc as DispatchError).message.length).toBeLessThan(700);
       expect((exc as DispatchError).message).toContain("…");
     }
   });
 
+  it("throws DispatchError(status=0) when the token is empty — no network call", async () => {
+    const { fn, calls } = fakeFetch(new Response(null, { status: 204 }));
+    await expect(
+      dispatchWorkflow({ repo: "o/r", workflow: "x.yml", token: "", fetchImpl: fn, timeoutMs: 0 }),
+    ).rejects.toMatchObject({
+      name: "DispatchError",
+      status: 0,
+      message: expect.stringMatching(/empty or unset/i),
+    });
+    expect(calls).toHaveLength(0);
+  });
+
   it("rejects malformed repo slugs without making a network call", async () => {
     const { fn, calls } = fakeFetch(new Response(null, { status: 204 }));
     await expect(
-      dispatchWorkflow({ repo: "bad repo", workflow: "x.yml", token: "t", fetchImpl: fn }),
+      dispatchWorkflow({ repo: "bad repo", workflow: "x.yml", token: "t", fetchImpl: fn, timeoutMs: 0 }),
     ).rejects.toThrow(/invalid repo slug/);
     expect(calls).toHaveLength(0);
   });
@@ -99,8 +111,39 @@ describe("dispatchWorkflow", () => {
   it("rejects workflow names that aren't .yml/.yaml", async () => {
     const { fn, calls } = fakeFetch(new Response(null, { status: 204 }));
     await expect(
-      dispatchWorkflow({ repo: "o/r", workflow: "evil.sh", token: "t", fetchImpl: fn }),
+      dispatchWorkflow({ repo: "o/r", workflow: "evil.sh", token: "t", fetchImpl: fn, timeoutMs: 0 }),
     ).rejects.toThrow(/invalid workflow filename/);
     expect(calls).toHaveLength(0);
+  });
+
+  it("wraps fetch network errors as DispatchError(status=0)", async () => {
+    const fn: typeof fetch = vi.fn(async () => {
+      throw new TypeError("network down");
+    }) as unknown as typeof fetch;
+    await expect(
+      dispatchWorkflow({ repo: "o/r", workflow: "x.yml", token: "t", fetchImpl: fn, timeoutMs: 0 }),
+    ).rejects.toMatchObject({
+      name: "DispatchError",
+      status: 0,
+      message: expect.stringContaining("network down"),
+    });
+  });
+
+  it("returns '<unreadable body>' when the response body read fails", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const resp = new Response("not inspected", { status: 500, statusText: "Err" });
+    // Replace text() with a rejecting stub so safeReadText's catch path fires.
+    Object.defineProperty(resp, "text", {
+      value: () => Promise.reject(new Error("stream aborted")),
+    });
+    const fn: typeof fetch = vi.fn(async () => resp) as unknown as typeof fetch;
+
+    await expect(
+      dispatchWorkflow({ repo: "o/r", workflow: "x.yml", token: "t", fetchImpl: fn, timeoutMs: 0 }),
+    ).rejects.toMatchObject({
+      name: "DispatchError",
+      status: 500,
+      message: expect.stringContaining("<unreadable body>"),
+    });
   });
 });

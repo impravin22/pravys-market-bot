@@ -20,15 +20,11 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
   };
 }
 
-function fakeCtx(): { ctx: ExecutionContext; pending: Promise<unknown>[] } {
-  const pending: Promise<unknown>[] = [];
+function fakeCtx(): ExecutionContext {
   return {
-    pending,
-    ctx: {
-      waitUntil: (p: Promise<unknown>) => pending.push(p),
-      passThroughOnException: () => {},
-    } as unknown as ExecutionContext,
-  };
+    waitUntil: () => {},
+    passThroughOnException: () => {},
+  } as unknown as ExecutionContext;
 }
 
 function fakeScheduled(cron: string): ScheduledController {
@@ -37,6 +33,10 @@ function fakeScheduled(cron: string): ScheduledController {
     scheduledTime: Date.now(),
     noRetry: () => {},
   } as ScheduledController;
+}
+
+function headerValue(init: RequestInit, name: string): string | null {
+  return new Headers(init.headers).get(name);
 }
 
 afterEach(() => {
@@ -48,27 +48,32 @@ describe("worker.scheduled", () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(null, { status: 204 }));
-    const { ctx, pending } = fakeCtx();
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
 
-    await worker.scheduled!(fakeScheduled("5 23 * * *"), fakeEnv(), ctx);
-    await Promise.all(pending);
+    await worker.scheduled!(fakeScheduled("0 3 * * 2-6"), fakeEnv(), fakeCtx());
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
     expect(url).toContain("/actions/workflows/market-pulse-morning.yml/dispatches");
-    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer ghp_test");
+    expect(headerValue(init, "Authorization")).toBe("Bearer ghp_test");
     expect(JSON.parse(init.body as string)).toEqual({ ref: "main" });
+    expect(infoSpy).toHaveBeenCalledWith(
+      "scheduled: dispatched",
+      "market-pulse-morning.yml",
+      "for cron",
+      "0 3 * * 2-6",
+    );
   });
 
   it("maps the evening cron to the evening workflow", async () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(null, { status: 204 }));
-    const { ctx, pending } = fakeCtx();
+    vi.spyOn(console, "info").mockImplementation(() => {});
 
-    await worker.scheduled!(fakeScheduled("15 10 * * 2-6"), fakeEnv(), ctx);
-    await Promise.all(pending);
+    await worker.scheduled!(fakeScheduled("15 10 * * 2-6"), fakeEnv(), fakeCtx());
 
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url] = fetchSpy.mock.calls[0] as [string];
     expect(url).toContain("/actions/workflows/market-pulse-evening.yml/dispatches");
   });
@@ -77,52 +82,85 @@ describe("worker.scheduled", () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(null, { status: 204 }));
-    const { ctx, pending } = fakeCtx();
+    vi.spyOn(console, "info").mockImplementation(() => {});
 
-    await worker.scheduled!(fakeScheduled("0 14 * * 1"), fakeEnv(), ctx);
-    await Promise.all(pending);
+    await worker.scheduled!(fakeScheduled("0 14 * * 1"), fakeEnv(), fakeCtx());
 
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url] = fetchSpy.mock.calls[0] as [string];
     expect(url).toContain("/actions/workflows/weekly-top3.yml/dispatches");
   });
 
   it("throws (so CF marks the run failed) when the cron is not in the mapping", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
-    const { ctx, pending } = fakeCtx();
 
     await expect(
-      worker.scheduled!(fakeScheduled("0 0 * * *"), fakeEnv(), ctx),
+      worker.scheduled!(fakeScheduled("0 0 * * *"), fakeEnv(), fakeCtx()),
     ).rejects.toThrow(/no workflow mapped for cron "0 0 \* \* \*"/);
 
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(pending).toHaveLength(0);
   });
 
-  it("propagates dispatch errors so Cloudflare marks the run failed", async () => {
+  it.each([
+    { status: 401, label: "invalid token" },
+    { status: 404, label: "wrong workflow or repo" },
+    { status: 422, label: "ref does not exist" },
+  ])("propagates a $status ($label) so Cloudflare marks the run failed", async ({ status }) => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response('{"message":"Bad credentials"}', { status: 401, statusText: "Unauthorized" }),
+      new Response('{"message":"error"}', { status, statusText: "Error" }),
     );
     vi.spyOn(console, "error").mockImplementation(() => {});
-    const { ctx, pending } = fakeCtx();
 
-    await worker.scheduled!(fakeScheduled("5 23 * * *"), fakeEnv(), ctx);
-    await expect(Promise.all(pending)).rejects.toThrow(/dispatch failed: 401/);
+    await expect(
+      worker.scheduled!(fakeScheduled("0 3 * * 2-6"), fakeEnv(), fakeCtx()),
+    ).rejects.toThrow(new RegExp(`dispatch failed: ${status}`));
+  });
+
+  it("propagates an empty-token error as a failed scheduled run", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(
+      worker.scheduled!(
+        fakeScheduled("0 3 * * 2-6"),
+        fakeEnv({ GITHUB_DISPATCH_TOKEN: "" }),
+        fakeCtx(),
+      ),
+    ).rejects.toThrow(/empty or unset/i);
+
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("uses env.GITHUB_REF when set to a non-main branch", async () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(null, { status: 204 }));
-    const { ctx, pending } = fakeCtx();
+    vi.spyOn(console, "info").mockImplementation(() => {});
 
     await worker.scheduled!(
-      fakeScheduled("5 23 * * *"),
+      fakeScheduled("0 3 * * 2-6"),
       fakeEnv({ GITHUB_REF: "feat/branch" }),
-      ctx,
+      fakeCtx(),
     );
-    await Promise.all(pending);
 
     const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
     expect(JSON.parse(init.body as string)).toEqual({ ref: "feat/branch" });
+  });
+
+  it("logs the error context before throwing so the Worker tail has a hint", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response('{"message":"Bad credentials"}', { status: 401, statusText: "Unauthorized" }),
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(
+      worker.scheduled!(fakeScheduled("0 3 * * 2-6"), fakeEnv(), fakeCtx()),
+    ).rejects.toThrow(/401/);
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      "scheduled: dispatch failed",
+      "market-pulse-morning.yml",
+      expect.any(Error),
+    );
   });
 });
