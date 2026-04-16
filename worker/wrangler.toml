@@ -28,7 +28,7 @@ GITHUB_REF = "main"
 # sub-minute accurate, so pre-market / post-close timing is reliable.
 [triggers]
 crons = [
-  "5 23 * * *",     # Morning pulse — 03:00 UTC = 08:30 IST / 11:00 TPE, Mon–Fri
+  "0 3 * * 2-6",     # Morning pulse — 03:00 UTC = 08:30 IST / 11:00 TPE, Mon–Fri
   "15 10 * * 2-6",   # Evening recap — 10:15 UTC = 15:45 IST / 18:15 TPE, Mon–Fri
   "0 14 * * 1",      # Weekly Top 3 — 14:00 UTC = 22:00 TPE, Sunday (CF DOW is 1-indexed: 1=Sun, 2=Mon, ..., 7=Sat)
 ]

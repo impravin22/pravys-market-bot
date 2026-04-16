@@ -44,8 +44,8 @@ export interface Env {
   CANSLIM_PLAYBOOK_FILE_ID: string;
   /** `owner/repo` for the GitHub Actions workflows the scheduled handler dispatches. */
   GITHUB_REPO: string;
-  /** Ref to dispatch against. Defaults to `main` when unset. */
-  GITHUB_REF?: string;
+  /** Ref to dispatch against. Always set via `[vars]` in wrangler.toml. */
+  GITHUB_REF: string;
   /** Fine-grained PAT with `actions:write` on {@link Env.GITHUB_REPO}. */
   GITHUB_DISPATCH_TOKEN: string;
 }
@@ -58,8 +58,8 @@ export interface Env {
  * sync with `wrangler.toml` `[triggers].crons` and the workflow filenames
  * in `.github/workflows/`.
  */
-const CRON_TO_WORKFLOW: Readonly<Record<string, string>> = Object.freeze({
-  "5 23 * * *": "market-pulse-morning.yml",
+const CRON_TO_WORKFLOW: Record<string, string> = Object.freeze({
+  "0 3 * * 2-6": "market-pulse-morning.yml",
   "15 10 * * 2-6": "market-pulse-evening.yml",
   "0 14 * * 1": "weekly-top3.yml",
 });
@@ -78,7 +78,7 @@ async function timingSafeEqual(a: string, b: string): Promise<boolean> {
   const ab = enc.encode(a);
   const bb = enc.encode(b);
   // Compare a fixed-length digest of both inputs so length differences
-  // don't leak via early-exit timing.
+  // don't cause early exit and length differences get folded into the diff.
   const da = new Uint8Array(await crypto.subtle.digest("SHA-256", ab));
   const db = new Uint8Array(await crypto.subtle.digest("SHA-256", bb));
   let diff = ab.byteLength === bb.byteLength ? 0 : 1;
@@ -248,30 +248,27 @@ export default {
    * swallow dispatch failures, because a silent failure means no Telegram
    * digest and no user-visible signal.
    */
-  async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+  async scheduled(event: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
     const workflow = CRON_TO_WORKFLOW[event.cron];
     if (!workflow) {
-      // Throw (don't just log-and-return) so Cloudflare marks the
-      // scheduled invocation as failed. A silent return would show as
-      // green in the dashboard even though no workflow fired.
       throw new Error(`scheduled: no workflow mapped for cron "${event.cron}"`);
     }
-    ctx.waitUntil(
-      dispatchWorkflow({
+    // Awaiting directly (rather than wrapping in ctx.waitUntil) is load-bearing:
+    // only a rejection on the handler's own return value causes Cloudflare to
+    // mark the scheduled invocation as failed. waitUntil rejections become
+    // unhandled promise rejections — the dashboard would show green even when
+    // dispatch errored, defeating the entire observability story.
+    try {
+      await dispatchWorkflow({
         repo: env.GITHUB_REPO,
         workflow,
-        ref: env.GITHUB_REF ?? "main",
+        ref: env.GITHUB_REF,
         token: env.GITHUB_DISPATCH_TOKEN,
-      }).then(
-        () => console.info("scheduled: dispatched", workflow, "for cron", event.cron),
-        (exc: unknown) => {
-          // Re-throw so Cloudflare marks the scheduled run as failed, which
-          // surfaces in the Worker's Logs tab and triggers any alerting
-          // wired on top of it.
-          console.error("scheduled: dispatch failed", workflow, exc);
-          throw exc;
-        },
-      ),
-    );
+      });
+      console.info("scheduled: dispatched", workflow, "for cron", event.cron);
+    } catch (exc) {
+      console.error("scheduled: dispatch failed", workflow, exc);
+      throw exc;
+    }
   },
 } satisfies ExportedHandler<Env>;
