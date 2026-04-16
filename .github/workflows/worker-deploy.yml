@@ -69,6 +69,7 @@ jobs:
           push_required UPSTASH_REDIS_REST_TOKEN '${{ secrets.UPSTASH_REDIS_REST_TOKEN }}'
           push_required BOT_USER_ID_SALT '${{ secrets.BOT_USER_ID_SALT }}'
           push_optional TELEGRAM_OWNER_USER_ID '${{ secrets.TELEGRAM_OWNER_USER_ID }}'
+          push_required GITHUB_DISPATCH_TOKEN '${{ secrets.GH_DISPATCH_TOKEN }}'
 
       - name: Deploy Worker
         id: deploy
