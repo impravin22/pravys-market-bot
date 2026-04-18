@@ -8,6 +8,7 @@ from core.digest_builder import (
     build_evening_recap,
     build_morning_pulse,
     build_on_demand_top5,
+    build_weekly_recap,
     build_weekly_top3,
 )
 from core.nse_data import Quote
@@ -121,6 +122,59 @@ def test_evening_recap_includes_gainers_losers_watchlist_narrative():
     assert "ITC.NS" in text
     assert "RELIANCE hit buy pivot" in text
     assert "Breadth positive" in text
+
+
+def test_weekly_recap_includes_week_labels_gainers_losers_narrative_and_risk_footer():
+    text = build_weekly_recap(
+        now=_now(),
+        market_tz="Asia/Kolkata",
+        indices=[IndexSnapshot("Nifty 50", 22780.0, 2.4)],
+        commodities=[Quote("GC=F", "Gold (USD/oz)", 2450.0, 2400.0)],
+        top_gainers=[DailyMover("TATAMOTORS.NS", 9.8, 2.1, "base breakout held")],
+        top_losers=[DailyMover("PAYTM.NS", -7.3, 1.4)],
+        narrative="IT leadership faded; defensives bid.",
+    )
+    assert "Week in Review" in text
+    assert "Week ending" in text
+    assert "How the market did this week" in text
+    assert "TATAMOTORS.NS" in text
+    assert "base breakout held" in text
+    assert "PAYTM.NS" in text
+    assert "IT leadership faded" in text
+    # Week-span digest must always footer the risk rules.
+    assert "Cut losses at" in text
+    assert "Educational signals" in text
+
+
+def test_weekly_recap_handles_empty_movers_without_crashing():
+    text = build_weekly_recap(
+        now=_now(),
+        market_tz="Asia/Kolkata",
+        indices=[],
+        commodities=[],
+        top_gainers=[],
+        top_losers=[],
+    )
+    assert "Week in Review" in text
+    assert "(index snapshot unavailable)" in text
+    assert "(data unavailable)" in text
+    # No narrative section when empty.
+    assert "Gemini's week take" not in text
+
+
+def test_weekly_recap_escapes_html_in_symbols_and_narrative():
+    text = build_weekly_recap(
+        now=_now(),
+        market_tz="Asia/Kolkata",
+        indices=[IndexSnapshot("<b>Nifty</b>", 100.0, 1.0)],
+        commodities=[],
+        top_gainers=[DailyMover("<script>", 5.0, 1.0, "<img src=x>")],
+        top_losers=[],
+        narrative="<script>alert(1)</script>",
+    )
+    assert "<script>" not in text
+    assert "&lt;script&gt;" in text
+    assert "&lt;img src=x&gt;" in text
 
 
 def test_weekly_top3_renders_full_letter_breakdown_and_risk_footer():
