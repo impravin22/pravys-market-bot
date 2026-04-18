@@ -1,0 +1,36 @@
+name: Weekly Recap
+
+# Triggered by the Cloudflare Worker's scheduled() handler at 14:00 UTC
+# Saturday (19:30 IST / 22:00 TPE). Summarises the trading week:
+# indices WoW, commodity/FX 5-session change, top gainers/losers of the
+# week across Nifty 500, and a Gemini narrative. See worker/src/index.ts
+# and worker/wrangler.toml for why we moved off GitHub's native cron.
+#
+# Security: no untrusted github.event.* inputs are interpolated; all
+# secrets are passed via env: rather than inline, mirroring the other
+# market-pulse workflows in this repo.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  recap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - name: Send weekly recap
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GOOGLE_SEARCH_API_KEY: ${{ secrets.GOOGLE_SEARCH_API_KEY }}
+          GOOGLE_CSE_ID: ${{ secrets.GOOGLE_CSE_ID }}
+          GOOGLE_AI_DEFAULT_MODEL: gemini-2.5-pro
+        run: uv run python -m jobs.weekly_recap

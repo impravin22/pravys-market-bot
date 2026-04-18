@@ -185,6 +185,67 @@ def build_evening_recap(
     return "\n".join(lines)
 
 
+def build_weekly_recap(
+    *,
+    now: datetime,
+    market_tz: str,
+    indices: list[IndexSnapshot],
+    commodities: list[Quote],
+    top_gainers: list[DailyMover],
+    top_losers: list[DailyMover],
+    narrative: str = "",
+) -> str:
+    """Weekly recap digest — Saturday wrap-up of the trading week.
+
+    Same presentation shape as the evening recap, but labels signal a 5-session
+    window. Index `change_pct` is week-over-week (Fri close vs prior Fri close),
+    and movers are the best/worst performers across the past 5 sessions.
+    """
+    lines: list[str] = []
+    lines.append("📊 <b>Pravy's Market — Week in Review</b>")
+    lines.append(f"Week ending {escape_html(_fmt_time(now, market_tz))}")
+    lines.append("")
+
+    lines.append("📈 <b>How the market did this week</b>")
+    lines.extend(_fmt_indices(indices))
+    lines.append("")
+
+    lines.append("🥇 <b>Commodities &amp; FX (5d)</b>")
+    lines.extend(_fmt_commodities(commodities))
+    lines.append("")
+
+    lines.append("⭐ <b>Top gainers of the week</b>")
+    if top_gainers:
+        for m in top_gainers:
+            note = f" — {escape_html(m.note)}" if m.note else ""
+            lines.append(
+                f"  • {escape_html(m.symbol)}  {m.change_pct:+.2f}% on {m.volume_multiple:.1f}× vol{note}"
+            )
+    else:
+        lines.append("  • (data unavailable)")
+    lines.append("")
+
+    lines.append("🔻 <b>Top losers of the week</b>")
+    if top_losers:
+        for m in top_losers:
+            lines.append(
+                f"  • {escape_html(m.symbol)}  {m.change_pct:+.2f}% on {m.volume_multiple:.1f}× vol"
+            )
+    else:
+        lines.append("  • (data unavailable)")
+    lines.append("")
+
+    if narrative:
+        lines.append("🧠 <b>Gemini's week take</b>")
+        lines.append(f"  {escape_html(narrative)}")
+        lines.append("")
+
+    lines.append(RISK_RULES_FOOTER)
+    lines.append("")
+    lines.append(DISCLAIMER)
+    return "\n".join(lines)
+
+
 def build_weekly_top3(
     *,
     now: datetime,

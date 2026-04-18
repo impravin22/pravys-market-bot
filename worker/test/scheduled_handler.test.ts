@@ -65,20 +65,20 @@ describe("worker.scheduled", () => {
     );
   });
 
-  it("maps the evening cron to the evening workflow", async () => {
+  it("maps the Sat weekly-recap cron to the weekly-recap workflow", async () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(null, { status: 204 }));
     vi.spyOn(console, "info").mockImplementation(() => {});
 
-    await worker.scheduled!(fakeScheduled("15 10 * * 2-6"), fakeEnv(), fakeCtx());
+    await worker.scheduled!(fakeScheduled("0 14 * * 7"), fakeEnv(), fakeCtx());
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url] = fetchSpy.mock.calls[0] as [string];
-    expect(url).toContain("/actions/workflows/market-pulse-evening.yml/dispatches");
+    expect(url).toContain("/actions/workflows/weekly-recap.yml/dispatches");
   });
 
-  it("maps the weekly cron to the weekly workflow", async () => {
+  it("maps the Sun weekly cron to the weekly-top3 workflow", async () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(null, { status: 204 }));
