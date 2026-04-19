@@ -30,7 +30,7 @@ GITHUB_REF = "main"
 crons = [
   "0 3 * * 2-6",     # Morning pulse — 03:00 UTC = 08:30 IST / 11:00 TPE, Mon–Fri
   "0 14 * * 7",      # Weekly Recap — 14:00 UTC = 19:30 IST / 22:00 TPE, Saturday (CF DOW 7=Sat)
-  "0 14 * * 1",      # Weekly Top 3 (lookahead) — 14:00 UTC Sunday (CF DOW 1=Sun)
+  "0 2 * * *",       # SMOKE: temporary near-future cron to surface scheduled() error via Telegram canary. Revert immediately after fire.
 ]
 
 # Enable Workers Observability so scheduled() invocations appear in the
