@@ -92,20 +92,13 @@ describe("worker.scheduled", () => {
   });
 
   it("throws (so CF marks the run failed) when the cron is not in the mapping", async () => {
-    // The Telegram canary still fires before throw — assert it went to Telegram
-    // (not GitHub) so a missing mapping never silently dispatches.
-    const fetchSpy = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(
-        new Response('{"ok":true,"result":{"message_id":1}}', { status: 200 }),
-      );
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
 
     await expect(
       worker.scheduled!(fakeScheduled("0 0 * * *"), fakeEnv(), fakeCtx()),
     ).rejects.toThrow(/no workflow mapped for cron "0 0 \* \* \*"/);
 
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect(String(fetchSpy.mock.calls[0][0])).toContain("api.telegram.org");
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -124,14 +117,7 @@ describe("worker.scheduled", () => {
   });
 
   it("propagates an empty-token error as a failed scheduled run", async () => {
-    // dispatchWorkflow throws on the empty-token guard before fetching
-    // GitHub, but the canary still pings Telegram so the operator sees
-    // exactly which env var is empty in prod.
-    const fetchSpy = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(
-        new Response('{"ok":true,"result":{"message_id":1}}', { status: 200 }),
-      );
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
     vi.spyOn(console, "error").mockImplementation(() => {});
 
     await expect(
@@ -142,14 +128,7 @@ describe("worker.scheduled", () => {
       ),
     ).rejects.toThrow(/empty or unset/i);
 
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect(String(fetchSpy.mock.calls[0][0])).toContain("api.telegram.org");
-    // The canary message body must include the env snapshot so the failure
-    // mode is diagnosable without a wrangler tail session.
-    const init = fetchSpy.mock.calls[0][1] as RequestInit;
-    const body = JSON.parse(init.body as string) as { text: string };
-    expect(body.text).toMatch(/token_len=0/);
-    expect(body.text).toMatch(/error: DispatchError/);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("uses env.GITHUB_REF when set to a non-main branch", async () => {
