@@ -30,7 +30,7 @@ GITHUB_REF = "main"
 crons = [
   "0 3 * * 2-6",     # Morning pulse — 03:00 UTC = 08:30 IST / 11:00 TPE, Mon–Fri
   "0 14 * * 7",      # Weekly Recap — 14:00 UTC = 19:30 IST / 22:00 TPE, Saturday (CF DOW 7=Sat)
-  "43 6 * * *",      # SMOKE: validate end-to-end at 06:43 UTC. Revert immediately after.
+  "48 6 * * *",      # SMOKE: validate end-to-end at 06:48 UTC. Revert immediately after.
 ]
 
 # Enable Workers Observability so scheduled() invocations appear in the
