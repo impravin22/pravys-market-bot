@@ -33,16 +33,14 @@ def main() -> int:
     if result is None:
         logger.error("Screener unavailable — sending failure notice")
         tg.send_message(
-            "⚠️ <b>Weekly Top 3</b>\n"
-            "Screener was unavailable this week. Will retry next Sunday.",
+            "⚠️ <b>Weekly Top 3</b>\nScreener was unavailable this week. Will retry next Sunday.",
         )
         return 1
 
     annotated: list[tuple] = []
     if not result.scored:
         logger.warning(
-            "Screener returned 0 qualified at min_binary=6 (universe=%d) — "
-            "sending no-picks digest",
+            "Screener returned 0 qualified at min_binary=6 (universe=%d) — sending no-picks digest",
             result.universe_size,
         )
     else:
