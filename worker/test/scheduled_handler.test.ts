@@ -84,7 +84,7 @@ describe("worker.scheduled", () => {
       .mockResolvedValue(new Response(null, { status: 204 }));
     vi.spyOn(console, "info").mockImplementation(() => {});
 
-    await worker.scheduled!(fakeScheduled("0 2 * * *"), fakeEnv(), fakeCtx());
+    await worker.scheduled!(fakeScheduled("25 6 * * *"), fakeEnv(), fakeCtx());
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url] = fetchSpy.mock.calls[0] as [string];
