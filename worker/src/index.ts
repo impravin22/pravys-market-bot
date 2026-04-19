@@ -61,7 +61,7 @@ export interface Env {
 const CRON_TO_WORKFLOW: Record<string, string> = Object.freeze({
   "0 3 * * 2-6": "market-pulse-morning.yml",
   "0 14 * * 7": "weekly-recap.yml",
-  "25 6 * * *": "weekly-top3.yml",
+  "0 14 * * 1": "weekly-top3.yml",
 });
 
 const MAX_INPUT_CHARS = 1000;
