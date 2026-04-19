@@ -249,8 +249,26 @@ export default {
    * digest and no user-visible signal.
    */
   async scheduled(event: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+    // Diagnostic canary: every scheduled() invocation pings Telegram with the
+    // outcome and, on failure, the exact error class + a redacted env snapshot.
+    // CF Observability has been silently dropping these errors so we surface
+    // them via the channel that's already wired and verified working
+    // (TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID — same path the digests use).
+    // Remove this canary once the root cause is fixed.
+    const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
+    const envSnapshot =
+      `repo=${env.GITHUB_REPO || "<unset>"} ` +
+      `ref=${env.GITHUB_REF || "<unset>"} ` +
+      `token_len=${(env.GITHUB_DISPATCH_TOKEN ?? "").length}`;
+
     const workflow = CRON_TO_WORKFLOW[event.cron];
     if (!workflow) {
+      const msg = `❌ cron "${event.cron}" has no mapping. ${envSnapshot}`;
+      try {
+        await tg.sendMessage(env.TELEGRAM_CHAT_ID, msg);
+      } catch (notifyExc) {
+        console.error("canary: telegram notify failed", notifyExc);
+      }
       throw new Error(`scheduled: no workflow mapped for cron "${event.cron}"`);
     }
     // Awaiting directly (rather than wrapping in ctx.waitUntil) is load-bearing:
@@ -268,6 +286,19 @@ export default {
       console.info("scheduled: dispatched", workflow, "for cron", event.cron);
     } catch (exc) {
       console.error("scheduled: dispatch failed", workflow, exc);
+      const errName = exc instanceof Error ? exc.name : typeof exc;
+      const errMsg = exc instanceof Error ? exc.message : String(exc);
+      const status = (exc as { status?: number })?.status;
+      const statusPart = typeof status === "number" ? ` status=${status}` : "";
+      const canary =
+        `❌ scheduled() dispatch failed\n` +
+        `cron: ${event.cron}\nworkflow: ${workflow}\n` +
+        `error: ${errName}${statusPart}\nmessage: ${errMsg}\n${envSnapshot}`;
+      try {
+        await tg.sendMessage(env.TELEGRAM_CHAT_ID, canary);
+      } catch (notifyExc) {
+        console.error("canary: telegram notify failed", notifyExc);
+      }
       throw exc;
     }
   },
