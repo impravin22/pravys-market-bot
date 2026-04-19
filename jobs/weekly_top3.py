@@ -24,33 +24,46 @@ logger = logging.getLogger("weekly_top3")
 
 def main() -> int:
     config = load_config()
+    tg = TelegramClient(config.telegram.bot_token, config.telegram.chat_id)
     result = run_screener(min_binary=6)  # stricter bar for weekly picks
-    if result is None or not result.scored:
-        logger.error("Screener empty — skipping weekly top3 send")
-        return 0
 
-    gemini = GeminiClient(
-        api_key=config.google.api_key,
-        model=config.google.model,
-        search_api_key=config.google.search_api_key,
-        cse_id=config.google.cse_id,
-    )
-    picks = result.scored[:3]
+    # Distinguish "screener crashed" from "screener returned 0 qualified".
+    # The latter is a normal weak-market outcome and the user still wants a
+    # signal that the digest ran — silent skip looks like a broken bot.
+    if result is None:
+        logger.error("Screener unavailable — sending failure notice")
+        tg.send_message(
+            "⚠️ <b>Weekly Top 3</b>\nScreener was unavailable this week. Will retry next Sunday.",
+        )
+        return 1
+
     annotated: list[tuple] = []
-    for s in picks:
-        context_lines = [f"{code}: {s.letters[code].note}" for code in "CANSLIM"]
-        context = f"CAN SLIM {s.binary_score}/7. Score detail:\n" + "\n".join(context_lines)
-        rationale = gemini.summarise_with_news(s.symbol, context)
-        annotated.append((s, rationale))
+    if not result.scored:
+        logger.warning(
+            "Screener returned 0 qualified at min_binary=6 (universe=%d) — sending no-picks digest",
+            result.universe_size,
+        )
+    else:
+        gemini = GeminiClient(
+            api_key=config.google.api_key,
+            model=config.google.model,
+            search_api_key=config.google.search_api_key,
+            cse_id=config.google.cse_id,
+        )
+        for s in result.scored[:3]:
+            context_lines = [f"{code}: {s.letters[code].note}" for code in "CANSLIM"]
+            context = f"CAN SLIM {s.binary_score}/7. Score detail:\n" + "\n".join(context_lines)
+            rationale = gemini.summarise_with_news(s.symbol, context)
+            annotated.append((s, rationale))
 
+    # build_weekly_top3 already renders a "No stocks met the CAN SLIM bar
+    # this week." line when picks is empty, so we always send a message.
     now = datetime.now(tz=ZoneInfo("UTC"))
     text = build_weekly_top3(
         now=now,
         market_tz=config.market_tz,
         picks=annotated,
     )
-
-    tg = TelegramClient(config.telegram.bot_token, config.telegram.chat_id)
     tg.send_message(text)
     logger.info(
         "weekly-top3-sent | universe=%d | qualified=%d | picks=%d",
