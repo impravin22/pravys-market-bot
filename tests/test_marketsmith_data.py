@@ -9,6 +9,7 @@ from core.canslim import LetterResult, MarketRegime
 from jobs.marketsmith_data import (
     IndexAction,
     _build_buy_watchlist,
+    _index_action,
     _movers,
     _serialise_index,
 )
@@ -108,3 +109,54 @@ def test_market_regime_uses_classify_phase() -> None:
         phase="confirmed-uptrend",
     )
     assert regime.is_uptrend is True
+
+
+class TestIndexActionVolumeNanGuard:
+    """Yfinance occasionally returns NaN for Volume on first-day or thinly-traded
+    sessions. The previous `or 0` guard kept the NaN through (NaN is truthy in
+    Python), which then propagated into the JSON output and crashed json.dump.
+    """
+
+    def test_nan_volume_is_treated_as_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from core.nse_data import StockHistory
+
+        df = pd.DataFrame(
+            {
+                "Open": [100.0, 102.0],
+                "High": [101.0, 103.0],
+                "Low": [99.0, 101.0],
+                "Close": [100.0, 102.0],
+                "Volume": [float("nan"), float("nan")],
+            }
+        )
+
+        def fake_history(symbol: str, *, period: str = "1y", interval: str = "1d") -> object:
+            return StockHistory(symbol=symbol, history=df)
+
+        monkeypatch.setattr("jobs.marketsmith_data.fetch_history", fake_history)
+        action = _index_action("Test", "TEST.NS")
+        assert action is not None
+        assert action.volume == 0.0
+        assert action.prev_volume == 0.0
+        # The serialised JSON must NOT contain NaN — would crash json.dump.
+        import json
+
+        from jobs.marketsmith_data import _serialise_index
+
+        json.dumps(_serialise_index(action))
+
+
+class TestUpstashOptional:
+    """Distribution day tracking should be best-effort: missing creds produce
+    a graceful inline DD calculation, not a KeyError that kills the job."""
+
+    def test_missing_upstash_creds_does_not_crash(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Strip both Upstash vars from the environment.
+        monkeypatch.delenv("UPSTASH_REDIS_REST_URL", raising=False)
+        monkeypatch.delenv("UPSTASH_REDIS_REST_TOKEN", raising=False)
+
+        from core.distribution_days import DistributionDayTracker
+
+        # Validate the inline fallback used by build_snapshot when creds missing.
+        assert DistributionDayTracker.is_today_distribution(-0.85, 6.0) is True
+        assert DistributionDayTracker.is_today_distribution(0.5, -3.0) is False
