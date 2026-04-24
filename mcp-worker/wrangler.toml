@@ -1,0 +1,17 @@
+name = "pravys-market-bot-mcp"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+# MCP server worker. Hosts a tiny `send_telegram_message` tool that the
+# Claude RemoteTrigger calls (the Anthropic CCR sandbox blocks direct
+# api.telegram.org egress). MCP traffic from Claude is well under the
+# free-tier limits (100k req/day, 10ms CPU/req).
+workers_dev = true
+
+# Secrets to set via `wrangler secret put`:
+#   TELEGRAM_BOT_TOKEN  — Bot API token from @BotFather
+#   MCP_BEARER          — shared secret Claude must send in Authorization header
+
+[observability]
+enabled = true
