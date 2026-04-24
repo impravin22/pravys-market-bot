@@ -31,6 +31,8 @@ from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import pandas as pd
+
 from core.canslim import CanslimScore, phase_label
 from core.config import load_config
 from core.distribution_days import DistributionDayTracker
@@ -152,8 +154,13 @@ def _index_action(label: str, symbol: str) -> IndexAction | None:
     last_close = float(last_row["Close"])
     prev_close = float(prev_row["Close"])
     change_pct = (last_close / prev_close - 1.0) * 100.0 if prev_close else 0.0
-    volume = float(last_row.get("Volume") or 0)
-    prev_volume = float(prev_row.get("Volume") or 0)
+
+    # `or 0` fails for NaN (NaN is truthy in Python), which would propagate
+    # NaN into the JSON output and crash json.dumps. Use pd.notna() instead.
+    raw_vol = last_row.get("Volume")
+    raw_prev_vol = prev_row.get("Volume")
+    volume = float(raw_vol) if pd.notna(raw_vol) else 0.0
+    prev_volume = float(raw_prev_vol) if pd.notna(raw_prev_vol) else 0.0
     vol_change_pct = (volume / prev_volume - 1.0) * 100.0 if prev_volume else 0.0
 
     closes = df["Close"]
@@ -272,15 +279,27 @@ def build_snapshot(*, today: date | None = None, force: bool = False) -> dict[st
     nifty_change = nifty.change_pct if nifty else 0.0
     nifty_vol_change = nifty.volume_change_pct if nifty else 0.0
 
-    tracker = DistributionDayTracker(
-        redis_url=os.environ["UPSTASH_REDIS_REST_URL"],
-        redis_token=os.environ["UPSTASH_REDIS_REST_TOKEN"],
-    )
-    dd_result = tracker.record_today(
-        today=today,
-        nifty_change_pct=nifty_change,
-        volume_change_pct=nifty_vol_change,
-    )
+    # Distribution-day tracking is best-effort: if Upstash creds are absent
+    # we still emit the snapshot, just without a rolling DD count. This keeps
+    # a missing env var from killing the entire daily report.
+    upstash_url = os.environ.get("UPSTASH_REDIS_REST_URL")
+    upstash_token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+    if upstash_url and upstash_token:
+        tracker = DistributionDayTracker(redis_url=upstash_url, redis_token=upstash_token)
+        dd_result = tracker.record_today(
+            today=today,
+            nifty_change_pct=nifty_change,
+            volume_change_pct=nifty_vol_change,
+        )
+        dd_active = dd_result.active_count
+        dd_today = dd_result.is_distribution_day
+    else:
+        logger.warning(
+            "Upstash creds missing — skipping distribution day tracking, "
+            "today's DD flag computed inline only"
+        )
+        dd_today = DistributionDayTracker.is_today_distribution(nifty_change, nifty_vol_change)
+        dd_active = 1 if dd_today else 0
 
     nifty50 = _nifty50_symbols()
     movers, advances, declines = _movers(nifty50)
@@ -321,8 +340,8 @@ def build_snapshot(*, today: date | None = None, force: bool = False) -> dict[st
         "market_pulse": {
             "phase": regime_phase,
             "phase_label": phase_label(regime_phase),
-            "distribution_days_active": dd_result.active_count,
-            "today_was_distribution_day": dd_result.is_distribution_day,
+            "distribution_days_active": dd_active,
+            "today_was_distribution_day": dd_today,
         },
         "nifty_action": _serialise_index(nifty),
         "sensex_action": _serialise_index(sensex),
