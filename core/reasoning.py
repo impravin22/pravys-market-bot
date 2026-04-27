@@ -161,11 +161,19 @@ class ReasoningEngine:
 
     def _ensure_pick(self) -> PickPredictor:
         if self._pick_predictor is None:
+            if dspy is None:
+                raise RuntimeError(
+                    "dspy not installed — install dspy-ai or inject pick_predictor=..."
+                )
             self._pick_predictor = dspy.ChainOfThought(_build_pick_signature())
         return self._pick_predictor
 
     def _ensure_sell(self) -> SellPredictor:
         if self._sell_predictor is None:
+            if dspy is None:
+                raise RuntimeError(
+                    "dspy not installed — install dspy-ai or inject sell_predictor=..."
+                )
             self._sell_predictor = dspy.ChainOfThought(_build_sell_signature())
         return self._sell_predictor
 

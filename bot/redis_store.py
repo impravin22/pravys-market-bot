@@ -73,6 +73,19 @@ class RedisStore:
         self._config = config
         self._http = http_client or httpx.Client(timeout=DEFAULT_TIMEOUT)
 
+    @property
+    def user_id_salt(self) -> str:
+        """Public read-only access to the per-deployment hashing salt.
+
+        Exposed so layered stores (e.g. ``core.portfolio.PortfolioStore``)
+        can hash chat_ids consistently without poking at private fields.
+        """
+        return self._config.user_id_salt
+
+    def call(self, *args: str) -> Any:
+        """Public command runner — same semantics as ``_call`` (kept for back-compat)."""
+        return self._call(*args)
+
     def _call(self, *args: str) -> Any:
         """POST a command to Upstash. Returns the parsed ``result`` field.
 

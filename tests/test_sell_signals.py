@@ -155,6 +155,15 @@ def test_eight_week_rule_holds_for_leader():
     assert signal.severity == SellSeverity.HOLD
 
 
+def test_eight_week_rule_skips_when_no_rs_data():
+    """No RS data → can't classify leader vs non-leader; stay silent."""
+    h = _holding(buy_price=100.0, days_ago=28)
+    history = _ohlcv([100.0] * 60 + [122.0])
+    signal = evaluate_holding(h, current_close=122.0, history=history, current_rs=None)
+    # Without RS, don't fire 8-week TRIM. Could be any other signal or HOLD.
+    assert signal.rule != "eight_week_rule_non_leader"
+
+
 # -----------------------------------------------------------------------------
 # Hold path
 # -----------------------------------------------------------------------------

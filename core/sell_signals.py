@@ -21,9 +21,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import pandas as pd
+
+if TYPE_CHECKING:
+    from core.portfolio import Holding
 
 DEFAULT_STOP_PCT: Final[float] = 0.07
 PIVOT_STOP_PCT: Final[float] = 0.08
@@ -65,7 +68,7 @@ _RULE_ORDER = (
 
 
 def evaluate_holding(
-    holding,
+    holding: Holding,
     *,
     current_close: float,
     history: pd.DataFrame,
@@ -106,7 +109,7 @@ def evaluate_holding(
 # -----------------------------------------------------------------------------
 
 
-def _stop_7pct(holding, current_close: float) -> SellSignal | None:
+def _stop_7pct(holding: Holding, current_close: float) -> SellSignal | None:
     floor = holding.buy_price * (1.0 - DEFAULT_STOP_PCT)
     if current_close <= floor:
         return SellSignal(
@@ -120,7 +123,7 @@ def _stop_7pct(holding, current_close: float) -> SellSignal | None:
     return None
 
 
-def _stop_pivot_8pct(holding, current_close: float) -> SellSignal | None:
+def _stop_pivot_8pct(holding: Holding, current_close: float) -> SellSignal | None:
     if holding.pivot_price is None:
         return None
     floor = holding.pivot_price * (1.0 - PIVOT_STOP_PCT)
@@ -188,7 +191,7 @@ def _climax_top(closes: pd.Series, volumes: pd.Series, current_close: float) -> 
 
 
 def _eight_week_rule(
-    holding, current_close: float, today: date, current_rs: float | None
+    holding: Holding, current_close: float, today: date, current_rs: float | None
 ) -> SellSignal | None:
     days_held = (today - holding.buy_date).days
     if not (0 <= days_held <= EIGHT_WEEKS_DAYS):
@@ -196,14 +199,18 @@ def _eight_week_rule(
     gain_pct = (current_close / holding.buy_price - 1.0) * 100.0
     if gain_pct < EIGHT_WEEK_GAIN_PCT:
         return None
-    if current_rs is not None and current_rs >= LEADER_RS_THRESHOLD:
+    # No RS data → can't classify leader vs non-leader. Stay silent rather
+    # than firing a TRIM signal on missing information.
+    if current_rs is None:
+        return None
+    if current_rs >= LEADER_RS_THRESHOLD:
         return None  # leaders run — hold them
     return SellSignal(
         SellSeverity.TRIM,
         "eight_week_rule_non_leader",
         (
-            f"+{gain_pct:.1f}% in {days_held}d but RS={current_rs} (<{LEADER_RS_THRESHOLD:.0f}) "
-            "— take profit on the non-leader"
+            f"+{gain_pct:.1f}% in {days_held}d but RS={current_rs:.0f} "
+            f"(<{LEADER_RS_THRESHOLD:.0f}) — take profit on the non-leader"
         ),
     )
 

@@ -13,12 +13,15 @@ weekly recap can compute hit rate per guru.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime
 from typing import Any
 
 from bot.redis_store import RedisStore, _hash_user_id
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_STOP_LOSS_PCT = 0.07  # 7% O'Neil rule
 KEY_PREFIX = "portfolio:"
@@ -137,20 +140,27 @@ class PortfolioStore:
         self._redis = redis
 
     def _key(self, chat_id: int) -> str:
-        return f"{KEY_PREFIX}{_hash_user_id(chat_id, self._redis._config.user_id_salt)}"
+        return f"{KEY_PREFIX}{_hash_user_id(chat_id, self._redis.user_id_salt)}"
 
     def get(self, *, chat_id: int) -> Portfolio:
-        raw = self._redis._call("GET", self._key(chat_id))
+        raw = self._redis.call("GET", self._key(chat_id))
         if raw is None:
             return Portfolio(chat_id=chat_id)
         try:
             return Portfolio.from_json(raw, chat_id=chat_id)
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            # Corruption is rare but never silent — log + reset to empty so
+            # the user gets a fresh portfolio rather than crashes on read.
+            logger.warning(
+                "portfolio JSON corrupt for chat_id=%s; resetting to empty (%s)",
+                chat_id,
+                exc,
+            )
             return Portfolio(chat_id=chat_id)
 
     def _save(self, portfolio: Portfolio) -> None:
         updated = replace(portfolio, last_updated=datetime.now(tz=UTC))
-        self._redis._call(
+        self._redis.call(
             "SET",
             self._key(portfolio.chat_id),
             updated.to_json(),

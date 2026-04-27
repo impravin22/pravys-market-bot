@@ -219,6 +219,18 @@ def test_chat_id_does_not_appear_in_redis_key(config):
     assert "8200970431" not in sent_key
 
 
+def test_get_corrupt_json_logs_warning_and_returns_empty(config, caplog):
+    """Corrupt JSON must reset to empty AND log — never silent."""
+    import logging
+
+    http = _http_mock([_response("not-json-{")])
+    store = PortfolioStore(RedisStore(config, http_client=http))
+    with caplog.at_level(logging.WARNING, logger="core.portfolio"):
+        portfolio = store.get(chat_id=42)
+    assert portfolio.holdings == []
+    assert any("corrupt" in rec.message for rec in caplog.records)
+
+
 def test_portfolio_total_value(config):
     p = Portfolio(
         chat_id=1,
