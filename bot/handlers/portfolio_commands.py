@@ -20,11 +20,13 @@ Supported:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
-from typing import Protocol
+from typing import Any, Protocol
 
 from core.portfolio import Holding, Portfolio
+from core.sell_signals import SellSeverity, SellSignal
 
 logger = logging.getLogger(__name__)
 
@@ -77,17 +79,49 @@ HELP_TEXT = (
     "  /portfolio — list your holdings\n"
     "  /add SYMBOL QTY PRICE [YYYY-MM-DD] — add a holding\n"
     "  /remove SYMBOL — remove a holding\n"
+    "  /sells — check sell rules on every holding\n"
+    "  /picks — show today's top buy candidates (cached)\n"
+    "  /why SYMBOL — guru breakdown for one ticker\n"
     "  /clear CONFIRM — wipe portfolio (requires the word CONFIRM)\n"
     "  /help — this message"
 )
 
 
-class PortfolioCommands:
-    """Routes parsed commands to portfolio actions and formats replies."""
+# Type aliases for the injected callables — keeps the constructor signature
+# self-documenting and lets tests pass plain functions.
+PicksCacheReader = Callable[[], Any | None]
+"""Returns the latest `CachedPicks` (from core.picks_cache) or None."""
 
-    def __init__(self, *, store: _StoreLike, today: date | None = None) -> None:
+WhyEvaluator = Callable[[str], dict[str, Any] | None]
+"""Given a normalised symbol, return a dict with keys
+``symbol``, ``composite_rating``, ``fundamentals_summary``, ``verdicts``."""
+
+SellsEvaluator = Callable[[Holding], SellSignal | None]
+"""Given a holding, return its sell-rule outcome (or None when not evaluable)."""
+
+
+class PortfolioCommands:
+    """Routes parsed commands to portfolio actions and formats replies.
+
+    Heavy dependencies (picks cache reader, single-stock evaluator,
+    sell-rule evaluator) are injected so tests can stub them and the
+    runtime wiring stays in one place (``jobs/chatbot_poll.py``).
+    """
+
+    def __init__(
+        self,
+        *,
+        store: _StoreLike,
+        today: date | None = None,
+        picks_cache_reader: PicksCacheReader | None = None,
+        why_evaluator: WhyEvaluator | None = None,
+        sells_evaluator: SellsEvaluator | None = None,
+    ) -> None:
         self._store = store
         self._today_factory = (lambda: today) if today is not None else date.today
+        self._picks_reader = picks_cache_reader
+        self._why_evaluator = why_evaluator
+        self._sells_evaluator = sells_evaluator
 
     def handle(self, *, chat_id: int, command: str, args: list[str]) -> CommandResult:
         if command == "help":
@@ -100,6 +134,12 @@ class PortfolioCommands:
             return self._cmd_remove(chat_id, args)
         if command == "clear":
             return self._cmd_clear(chat_id, args)
+        if command == "picks":
+            return self._cmd_picks()
+        if command == "why":
+            return self._cmd_why(args)
+        if command == "sells":
+            return self._cmd_sells(chat_id)
         return CommandResult("", should_skip_agent=False)
 
     # -------------------- /portfolio --------------------
@@ -191,6 +231,100 @@ class PortfolioCommands:
 
     # -------------------- /clear --------------------
 
+    # -------------------- /picks --------------------
+
+    def _cmd_picks(self) -> CommandResult:
+        if self._picks_reader is None:
+            return CommandResult(
+                "Picks aren't wired in this build. Run /help.",
+                should_skip_agent=True,
+            )
+        cached = self._picks_reader()
+        if cached is None or not getattr(cached, "picks", []):
+            return CommandResult(
+                "No picks computed yet. The morning cron writes them daily — "
+                "or run `uv run python -m jobs.daily_picks_job` once to seed.",
+                should_skip_agent=True,
+            )
+        lines = [f"Top picks (computed {cached.computed_at.strftime('%Y-%m-%d %H:%M UTC')}):"]
+        for p in cached.picks[:5]:
+            sym = p.get("symbol", "?")
+            comp = p.get("composite_rating", 0.0)
+            count = p.get("endorsement_count", 0)
+            endorsers = ", ".join(p.get("endorsing_codes", []) or ["—"])
+            summary = p.get("fundamentals_summary", "")
+            lines.append(
+                f"• {sym} — composite {comp:.0f}/99 · "
+                f"{count} guru{'s' if count != 1 else ''} ({endorsers})"
+            )
+            if summary:
+                lines.append(f"  {summary}")
+        return CommandResult("\n".join(lines), should_skip_agent=True)
+
+    # -------------------- /why --------------------
+
+    def _cmd_why(self, args: list[str]) -> CommandResult:
+        if len(args) != 1:
+            return CommandResult(
+                "Usage: /why SYMBOL\nExample: /why RELIANCE",
+                should_skip_agent=True,
+            )
+        if self._why_evaluator is None:
+            return CommandResult(
+                "Live single-stock evaluation isn't wired in this build.",
+                should_skip_agent=True,
+            )
+        symbol = _normalise_symbol(args[0])
+        result = self._why_evaluator(symbol)
+        if result is None:
+            return CommandResult(
+                f"Couldn't fetch fundamentals for {symbol} right now. Try again later.",
+                should_skip_agent=True,
+            )
+        verdicts = result.get("verdicts") or []
+        composite = result.get("composite_rating", 0.0)
+        summary = result.get("fundamentals_summary", "")
+        lines = [
+            f"{symbol} — composite {composite:.0f}/99",
+        ]
+        if summary:
+            lines.append(summary)
+        lines.append("")
+        for v in verdicts:
+            mark = "✅" if v.passes else "❌"
+            lines.append(f"{mark} {v.name} ({v.code}) — {v.rating_0_100:.0f}/100")
+            for c in v.checks:
+                tick = "•" if c.passes else "·"
+                lines.append(f"   {tick} {c.name}: {c.note}")
+        return CommandResult("\n".join(lines), should_skip_agent=True)
+
+    # -------------------- /sells --------------------
+
+    def _cmd_sells(self, chat_id: int) -> CommandResult:
+        portfolio = self._store.get(chat_id=chat_id)
+        if not portfolio.holdings:
+            return CommandResult(
+                "No holdings to evaluate. Add one with `/add SYMBOL QTY PRICE`.",
+                should_skip_agent=True,
+            )
+        if self._sells_evaluator is None:
+            return CommandResult(
+                "Live sell-rule evaluation isn't wired in this build.",
+                should_skip_agent=True,
+            )
+        lines = [f"Sell-rule check on {len(portfolio.holdings)} holdings:"]
+        for h in portfolio.holdings:
+            signal = self._sells_evaluator(h)
+            if signal is None:
+                lines.append(f"• {h.symbol}: data unavailable")
+                continue
+            badge = _severity_badge(signal.severity)
+            lines.append(
+                f"{badge} {h.symbol} — {signal.severity.value.upper()} "
+                f"({signal.rule}): {signal.reason}"
+            )
+        return CommandResult("\n".join(lines), should_skip_agent=True)
+
     def _cmd_clear(self, chat_id: int, args: list[str]) -> CommandResult:
         if len(args) != 1 or args[0] != "CONFIRM":
             return CommandResult(
@@ -218,3 +352,13 @@ def _normalise_symbol(raw: str) -> str:
     if upper.endswith(".NS") or upper.endswith(".BO"):
         return upper
     return f"{upper}.NS"
+
+
+def _severity_badge(severity: SellSeverity) -> str:
+    """Map a sell severity to a small visual marker for Telegram."""
+    return {
+        SellSeverity.SELL: "🚨",
+        SellSeverity.TRIM: "⚠️",
+        SellSeverity.WATCH: "👁",
+        SellSeverity.HOLD: "✅",
+    }.get(severity, "•")
