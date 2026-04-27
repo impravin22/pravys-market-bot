@@ -219,6 +219,78 @@ export async function readSymbolVerdicts(
   }
 }
 
+// -----------------------------------------------------------------------------
+// Symbol extraction + panel context for Gemini
+// -----------------------------------------------------------------------------
+
+const STOPWORDS = new Set([
+  "AND", "THE", "FOR", "BUT", "USA", "TO", "OF", "BY", "OR", "IS", "ME", "MY",
+  "SO", "AS", "AT", "BE", "DO", "GO", "NO", "OK", "PE", "PS", "PB", "EPS",
+  "API", "NSE", "BSE", "FII", "DII", "DMA", "RS", "ROE", "ROC", "ROIC", "FCF",
+  "DCF", "ETF", "PEG", "GARP", "CAGR", "YOY", "QOQ", "LTP", "OHLC", "ALL",
+  "OFF", "ITS", "HAS", "WAS", "WILL", "HAVE", "BEEN", "WERE", "FROM", "WITH",
+  "THIS", "THAT", "WHAT", "WHEN", "WHERE", "HOW", "WHY", "WHO", "WHICH",
+  "ABOUT", "INTO", "OVER", "UNDER", "TODAY", "DOWN", "GIVE", "TAKE", "MAKE",
+  "GET", "ANY", "MORE", "MOST", "TELL", "ASK", "GOOD", "BAD", "TRUE", "FALSE",
+  "YES", "AM", "PM", "UTC", "IST", "TPE", "INR", "USD", "EUR", "GBP", "JPY",
+  "FAQ", "AI", "ML", "LLM", "BOT", "API", "SDK",
+  // Internal codes our system uses — never confuse for tickers
+  "PASS", "FAIL", "PANEL", "CANSLIM", "CAN", "SLIM",
+]);
+
+/**
+ * Pull plausible NSE/BSE tickers out of free-form text. Anything 2–10
+ * uppercase chars (optionally followed by .NS or .BO) qualifies; common
+ * English / acronym stopwords are filtered. The caller still verifies
+ * each candidate against the verdict cache before using it.
+ */
+export function extractCandidateSymbols(text: string): string[] {
+  const matches = text.match(/\b[A-Z][A-Z0-9-]{1,9}(?:\.NS|\.BO)?\b/g) ?? [];
+  const unique = new Set<string>();
+  for (const m of matches) {
+    const bare = m.replace(/\.(NS|BO)$/, "");
+    if (STOPWORDS.has(bare)) continue;
+    if (bare.length < 2) continue;
+    const symbol = m.endsWith(".NS") || m.endsWith(".BO") ? m : `${bare}.NS`;
+    unique.add(symbol);
+  }
+  return Array.from(unique);
+}
+
+/**
+ * Build a compact panel-snapshot block for any candidate symbol that has
+ * cached verdicts. Returns the empty string when no symbol has a hit, so
+ * the caller can prepend unconditionally.
+ */
+export async function buildPanelContext(
+  symbols: string[],
+  redis: RedisStore,
+): Promise<string> {
+  if (symbols.length === 0) return "";
+  const blocks: string[] = [];
+  for (const symbol of symbols) {
+    const cached = await readSymbolVerdicts(redis, symbol);
+    if (!cached) continue;
+    const lines = [
+      `[PANEL: ${symbol} — composite ${cached.composite_rating.toFixed(0)}/99, ` +
+        `${cached.endorsement_count} of 7 gurus endorse]`,
+    ];
+    if (cached.fundamentals_summary) lines.push(cached.fundamentals_summary);
+    for (const v of cached.verdicts) {
+      const mark = v.passes ? "PASS" : "FAIL";
+      lines.push(`  ${v.code} (${v.name}): ${mark} ${v.rating_0_100.toFixed(0)}/100`);
+      // Surface up to 3 most-informative checks per guru.
+      const informative = v.checks.slice(0, 3);
+      for (const c of informative) {
+        const tick = c.passes ? "✓" : "×";
+        lines.push(`    ${tick} ${c.name}: ${c.note}`);
+      }
+    }
+    blocks.push(lines.join("\n"));
+  }
+  return blocks.length === 0 ? "" : blocks.join("\n\n") + "\n\n---\n\n";
+}
+
 export async function readPicksCache(redis: RedisStore): Promise<CachedPicks | null> {
   const raw = await redis.command("GET", PICKS_CACHE_KEY);
   if (typeof raw !== "string") return null;

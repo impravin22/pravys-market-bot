@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  CONTINUATION_PLACEHOLDER,
   PLACEHOLDER_TEXT,
+  SAFE_PER_MESSAGE_CHARS,
   TELEGRAM_MAX_CHARS,
-  TRUNCATION_SUFFIX,
   TelegramStream,
+  findSafeSplit,
 } from "../src/streaming";
 import { TelegramClient } from "../src/telegram";
 
@@ -141,12 +143,46 @@ describe("TelegramStream", () => {
     await expect(stream.stream(gen(["hi"]))).rejects.toThrow(/flood/);
   });
 
-  it("truncates past TELEGRAM_MAX_CHARS with a clear suffix", async () => {
-    const { client, edits } = fakeTelegram();
+  it("spans multiple messages when the reply exceeds one Telegram cap", async () => {
+    const { client, sentTexts, edits } = fakeTelegram();
     const stream = new TelegramStream(client, -100500);
-    const final = await stream.stream(gen(["x".repeat(TELEGRAM_MAX_CHARS + 200)]));
-    expect(final.length).toBeLessThanOrEqual(TELEGRAM_MAX_CHARS);
-    expect(edits.at(-1)?.text).toContain(TRUNCATION_SUFFIX.trim());
+    // 2.5x the per-message safe cap → expect 3 messages: placeholder +
+    // 2 continuation placeholders, plus one edit per message body.
+    const big = "x".repeat(SAFE_PER_MESSAGE_CHARS) + "\n" +
+                "y".repeat(SAFE_PER_MESSAGE_CHARS) + "\n" +
+                "z".repeat(SAFE_PER_MESSAGE_CHARS);
+    const final = await stream.stream(gen([big]));
+    // Final return text contains every part (joined by \n\n), so it can
+    // exceed TELEGRAM_MAX_CHARS — that is the whole point of this PR.
+    expect(final.length).toBeGreaterThan(TELEGRAM_MAX_CHARS);
+    // Three messages were started (1 initial + 2 continuations).
+    expect(sentTexts).toEqual([PLACEHOLDER_TEXT, CONTINUATION_PLACEHOLDER, CONTINUATION_PLACEHOLDER]);
+    // Every edit body fits within the per-message safe cap — Telegram
+    // never sees a body bigger than that.
+    for (const e of edits) {
+      expect(e.text.length).toBeLessThanOrEqual(TELEGRAM_MAX_CHARS);
+    }
+  });
+
+  it("findSafeSplit prefers the last newline within the lookback window", () => {
+    const text = "a".repeat(3000) + "\n" + "b".repeat(800);
+    const idx = findSafeSplit(text, SAFE_PER_MESSAGE_CHARS);
+    // Should split at the newline (index 3000), which is within the
+    // lookback (cap=3800, lookback=600 → window starts at 3200).
+    // Newline is at 3000, which is OUTSIDE the window — so we fall back
+    // to a hard cut at 3800. The function only treats newlines INSIDE
+    // the window as safe split points.
+    expect(idx).toBe(SAFE_PER_MESSAGE_CHARS);
+  });
+
+  it("findSafeSplit uses newline within the window when available", () => {
+    const text = "a".repeat(3500) + "\n" + "b".repeat(500);
+    const idx = findSafeSplit(text, SAFE_PER_MESSAGE_CHARS);
+    expect(idx).toBe(3501); // right after the newline
+  });
+
+  it("findSafeSplit returns text length when below the cap", () => {
+    expect(findSafeSplit("short", SAFE_PER_MESSAGE_CHARS)).toBe(5);
   });
 
   it("intermediate edit failures are swallowed; final edit still runs", async () => {

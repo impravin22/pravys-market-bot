@@ -26,7 +26,7 @@
 
 import { HermesAgent } from "./agent";
 import { dispatchWorkflow } from "./github";
-import { PortfolioStore } from "./portfolio";
+import { PortfolioStore, buildPanelContext, extractCandidateSymbols } from "./portfolio";
 import { PortfolioCommands, parseCommand } from "./portfolio_commands";
 import { RedisStore } from "./redis_store";
 import { TelegramStream } from "./streaming";
@@ -188,11 +188,34 @@ async function handleUpdate(update: TelegramUpdate, env: Env): Promise<void> {
     ...(env.CANSLIM_PLAYBOOK_FILE_ID ? { playbookFileId: env.CANSLIM_PLAYBOOK_FILE_ID } : {}),
   });
 
+  // Inject cached guru-panel verdicts when the user mentions a symbol.
+  // Gemini sees the panel block above the user text and weaves it into
+  // the reply — turns "analyse RELIANCE" into a guru-grounded analysis
+  // without a tool-call round-trip.
+  let enrichedText = text;
+  try {
+    const symbols = extractCandidateSymbols(text);
+    if (symbols.length > 0) {
+      const panelContext = await buildPanelContext(symbols, store);
+      if (panelContext) {
+        enrichedText = panelContext + text;
+        console.info(
+          "panel-context injected for",
+          symbols.length,
+          "candidate symbols, payload len=",
+          panelContext.length,
+        );
+      }
+    }
+  } catch (exc) {
+    console.warn("panel context build failed (continuing without):", (exc as Error).message);
+  }
+
   const stream = new TelegramStream(telegram, chatId);
 
   let final: string;
   try {
-    final = await stream.stream(agent.streamReply(text, historyPayload));
+    final = await stream.stream(agent.streamReply(enrichedText, historyPayload));
   } catch (exc) {
     try {
       await store.unmarkUser(userId);

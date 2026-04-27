@@ -4,8 +4,10 @@
  * Port of bot/streaming.py. Design decisions:
  *  - Send a placeholder, capture its message_id, edit repeatedly.
  *  - Throttle to ~1 edit/sec/chat to stay inside Telegram's rate limits.
- *  - 4096-char Telegram cap → truncate with a footnote rather than
- *    spawning a second message.
+ *  - When the streamed reply exceeds the 4096-char Telegram cap, finalise
+ *    the current message at a safe newline boundary and continue streaming
+ *    into a fresh sendMessage so long replies span 2-3 messages instead
+ *    of getting truncated mid-thought.
  *  - On "can't parse entities" fall back to one plain-text edit.
  *  - Non-parse 4xx bubble up so the caller can release the rate-limit slot.
  */
@@ -14,10 +16,19 @@ import { markdownToHtml } from "./markdown_to_html";
 import { TelegramClient } from "./telegram";
 
 export const PLACEHOLDER_TEXT = "⏳ Give me a sec, mate…";
+export const CONTINUATION_PLACEHOLDER = "⏳ … continued, mate …";
 export const EDIT_INTERVAL_MS = 1200;
 export const TELEGRAM_MAX_CHARS = 4096;
-export const TRUNCATION_SUFFIX =
-  "\n\n… (response truncated at Telegram's 4 000 character limit)";
+/**
+ * Per-message safety cap. Below the hard 4096 limit so HTML expansion
+ * (e.g. **bold** → <b>...</b>) and continuation footers don't push us over.
+ */
+export const SAFE_PER_MESSAGE_CHARS = 3800;
+/**
+ * Window before the cap in which we look for a clean newline to split on.
+ * 600 chars covers a few paragraphs of a typical Gemini reply.
+ */
+export const SPLIT_LOOKBACK_CHARS = 600;
 
 export class TelegramStream {
   private messageId: number | null = null;
@@ -103,30 +114,78 @@ export class TelegramStream {
   }
 
   /**
-   * Consume the async chunk iterator, driving edits. Returns the final
-   * text that was accepted by Telegram.
+   * Begin a continuation message — finalises the current edited message
+   * (without a "continued" footer; readers see one clean message, then
+   * the next) and opens a fresh placeholder for the tail of the reply.
+   */
+  private async startContinuation(): Promise<void> {
+    this.messageId = await this.telegram.sendMessage(
+      this.chatId,
+      CONTINUATION_PLACEHOLDER,
+    );
+    this.lastHtml = null;
+    this.lastEditAt = 0;
+  }
+
+  /**
+   * Consume the async chunk iterator, driving edits. Returns the
+   * concatenation of every part that was sent — useful for chat history
+   * persistence (so the user's next turn sees the full prior reply).
+   *
+   * When the running buffer exceeds `SAFE_PER_MESSAGE_CHARS`, the current
+   * message is committed at the last newline within the lookback window
+   * (or a hard split if nothing clean is available) and a fresh
+   * sendMessage starts the next part.
    */
   async stream(chunks: AsyncIterable<string>): Promise<string> {
     await this.start();
     let buffer = "";
+    let committedTotal = "";
+
     for await (const piece of chunks) {
       buffer += piece;
-      if (buffer.length > TELEGRAM_MAX_CHARS) {
-        buffer =
-          buffer.slice(0, TELEGRAM_MAX_CHARS - TRUNCATION_SUFFIX.length) + TRUNCATION_SUFFIX;
-        await this.safeEdit(buffer);
-        break;
+
+      // Spill over: commit current message at a safe boundary, continue
+      // streaming the tail into a fresh message. We loop because a single
+      // chunk can be very large (rare but possible).
+      while (buffer.length > SAFE_PER_MESSAGE_CHARS) {
+        const splitAt = findSafeSplit(buffer, SAFE_PER_MESSAGE_CHARS);
+        const head = buffer.slice(0, splitAt).trimEnd();
+        const tail = buffer.slice(splitAt);
+        if (head.length > 0) {
+          await this.editOnce(head);
+          committedTotal += (committedTotal.length > 0 ? "\n\n" : "") + head;
+        }
+        await this.startContinuation();
+        buffer = tail.trimStart();
       }
+
       const now = Date.now();
       if (now - this.lastEditAt >= EDIT_INTERVAL_MS) {
         await this.safeEdit(buffer);
         this.lastEditAt = now;
       }
     }
+
     const final = buffer.trim();
     if (final.length > 0) {
       await this.editOnce(final);
+      committedTotal += (committedTotal.length > 0 ? "\n\n" : "") + final;
     }
-    return final;
+    return committedTotal;
   }
+}
+
+/**
+ * Pick a split index inside ``[max - SPLIT_LOOKBACK_CHARS, max]``: prefer
+ * the position right after the last newline; fall back to a hard cut at
+ * ``max`` if the window has no newline.
+ */
+export function findSafeSplit(text: string, max: number): number {
+  if (text.length <= max) return text.length;
+  const windowStart = Math.max(0, max - SPLIT_LOOKBACK_CHARS);
+  const window = text.slice(windowStart, max);
+  const lastNewline = window.lastIndexOf("\n");
+  if (lastNewline !== -1) return windowStart + lastNewline + 1;
+  return max;
 }
