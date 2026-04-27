@@ -12,6 +12,7 @@ dependencies = [
     "google-genai>=1.0",
     "httpx>=0.28",
     "python-dotenv>=1.0",
+    "dspy-ai>=2.5",
 ]
 
 [project.optional-dependencies]
