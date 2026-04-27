@@ -24,7 +24,17 @@ import logging
 import sys
 from datetime import date, timedelta
 
+import httpx
+
 from core.backtest import BacktestSummary, run_backtest
+from core.canslim import StockFundamentals
+from core.data.screener_history import (
+    HistoricalFundamentals,
+    historical_fundamentals_at,
+)
+from core.data.screener_history import (
+    fetch_history as fetch_screener_history,
+)
 from core.nse_data import fetch_history, fetch_nifty
 from core.picks_orchestrator import default_universe
 
@@ -74,6 +84,25 @@ def main() -> int:
             histories[sym] = h.history
     logger.info("fetched %d histories", len(histories))
 
+    # Load screener.in 10-year history per symbol so the panel can replay
+    # against real point-in-time ratios. Single HTTP call per symbol; the
+    # ratio tables come from the same /consolidated/ page screener.in already
+    # serves to /screener_in.fetch_snapshot — but we hit it again here to keep
+    # this job self-contained (a future PR can merge the two fetches).
+    screener_history: dict[str, HistoricalFundamentals] = {}
+    with httpx.Client(timeout=10.0) as http:
+        for sym in histories:
+            h = fetch_screener_history(sym, http_client=http)
+            if h is not None:
+                screener_history[sym] = h
+    logger.info("fetched %d screener histories", len(screener_history))
+
+    def _hook(symbol: str, as_of: date) -> StockFundamentals | None:
+        history = screener_history.get(symbol)
+        if history is None:
+            return None
+        return historical_fundamentals_at(history, as_of=as_of)
+
     today = date.today()
     summary = run_backtest(
         symbols=list(histories.keys()),
@@ -85,6 +114,7 @@ def main() -> int:
         success_threshold_pct=DEFAULT_SUCCESS_THRESHOLD_PCT,
         step_days=DEFAULT_STEP_DAYS,
         min_composite=DEFAULT_MIN_COMPOSITE,
+        extra_fundamentals_at=_hook,
     )
     print(_format(summary))
     return 0
