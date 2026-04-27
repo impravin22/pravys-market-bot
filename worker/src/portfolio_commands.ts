@@ -12,7 +12,6 @@
 import {
   CachedPicks,
   Holding,
-  Portfolio,
   PortfolioStore,
   investedCapital,
   makeHolding,
