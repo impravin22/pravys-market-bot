@@ -31,8 +31,7 @@ from core.nse_data import fetch_history, fetch_nifty
 from core.picks_cache import PicksCache
 from core.rs_rating import ReturnPoint, compute_12m_return, rank_by_return
 from core.screener import detect_market_regime
-from core.strategies.canslim_strategy import CanslimStrategy
-from core.strategies.schloss import SchlossStrategy
+from core.strategies import all_strategies
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("daily_picks_job")
@@ -95,6 +94,18 @@ def _load_universe() -> list[str]:
     return [f"{s}.NS" for s in NIFTY_50_FALLBACK]
 
 
+def _compute_6m_momentum(history) -> float | None:
+    """Return percent change between the close ~126 sessions ago and the latest close."""
+    closes = history.history["Close"].dropna()
+    if len(closes) < 130:
+        return None
+    six_months_ago = float(closes.iloc[-126])
+    last_close = float(closes.iloc[-1])
+    if six_months_ago <= 0:
+        return None
+    return round((last_close / six_months_ago - 1.0) * 100.0, 2)
+
+
 def _build_fundamentals(
     symbols: list[str],
     *,
@@ -119,6 +130,7 @@ def _build_fundamentals(
             annual_eps_3y_cagr_pct=with_earnings.annual_eps_3y_cagr_pct,
             rs_rating=rs_ratings.get(sym),
             fii_dii_5d_net_positive=None,  # phase-1 skip
+            momentum_6m_pct=_compute_6m_momentum(history),
         )
         snapshot = screener_cache.get_or_fetch(sym)
         out.append(enrich_fundamentals_with_snapshot(with_rs, snapshot))
@@ -166,11 +178,10 @@ def main() -> int:
             universe, screener_cache=screener_cache, rs_ratings=rs_ratings
         )
 
-    strategies = [CanslimStrategy(), SchlossStrategy()]
     picks = daily_picks(
         fundamentals,
         regime,
-        strategies,
+        all_strategies(),
         top_n=int(os.getenv("DAILY_PICKS_TOP_N", "5")),
         min_composite=float(os.getenv("DAILY_PICKS_MIN_COMPOSITE", "60")),
     )

@@ -207,6 +207,8 @@ def enrich_fundamentals_with_snapshot(
         updates["debt_to_equity"] = snapshot.debt_to_equity
     if base.roe_5y_avg_pct is None and snapshot.roe_5y_avg_pct is not None:
         updates["roe_5y_avg_pct"] = snapshot.roe_5y_avg_pct
+    if base.roce_pct is None and snapshot.roce_pct is not None:
+        updates["roce_pct"] = snapshot.roce_pct
     if base.dividend_yield_pct is None and snapshot.dividend_yield_pct is not None:
         updates["dividend_yield_pct"] = snapshot.dividend_yield_pct
     if base.pays_dividend is None and snapshot.pays_dividend is not None:

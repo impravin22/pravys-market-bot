@@ -45,8 +45,7 @@ from core.picks_cache import PicksCache
 from core.portfolio import Holding, PortfolioStore
 from core.screener import detect_market_regime
 from core.sell_signals import SellSignal, evaluate_holding
-from core.strategies.canslim_strategy import CanslimStrategy
-from core.strategies.schloss import SchlossStrategy
+from core.strategies import all_strategies
 from core.telegram_client import TelegramClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -353,7 +352,7 @@ def main() -> int:
     screener_cache = ScreenerCache(
         redis=store, fetcher=lambda sym: fetch_snapshot(sym, http_client=screener_http)
     )
-    strategies = [CanslimStrategy(), SchlossStrategy()]
+    strategies = all_strategies()
 
     commands = PortfolioCommands(
         store=portfolio_store,

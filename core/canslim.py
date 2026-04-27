@@ -41,9 +41,11 @@ class StockFundamentals:
     debt_to_equity: float | None = None
     current_ratio: float | None = None
     roe_5y_avg_pct: float | None = None
+    roce_pct: float | None = None
     dividend_yield_pct: float | None = None
     pays_dividend: bool | None = None
     earnings_positive_recent: bool | None = None
+    momentum_6m_pct: float | None = None  # 6-month price return, used by Trending Value
 
 
 @dataclass(frozen=True)
