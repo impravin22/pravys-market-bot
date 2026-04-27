@@ -27,6 +27,7 @@ from core.daily_picks import Pick
 logger = logging.getLogger(__name__)
 
 CACHE_KEY = "picks:latest"
+VERDICT_KEY_PREFIX = "picks:verdicts:"
 DEFAULT_TTL_SECONDS = 60 * 60 * 24 * 7  # 7 days
 
 
@@ -100,6 +101,51 @@ class PicksCache:
             )
         except RuntimeError as exc:
             logger.warning("picks cache write failed: %s", exc)
+
+    def write_per_symbol_verdicts(self, picks: list[Pick]) -> None:
+        """Persist one verdict snapshot per symbol so /why can read it instantly.
+
+        Each ``picks:verdicts:{SYMBOL}`` key carries the full per-strategy
+        breakdown for one stock. Worker `/why SYMBOL` reads this directly
+        rather than recomputing the panel.
+        """
+        if self._redis is None:
+            return
+        for pick in picks:
+            payload = json.dumps(
+                {
+                    "symbol": pick.symbol,
+                    "composite_rating": pick.composite_rating,
+                    "endorsement_count": pick.endorsement_count,
+                    "endorsing_codes": list(pick.endorsing_codes),
+                    "fundamentals_summary": _summary_str(pick),
+                    "verdicts": [
+                        {
+                            "code": v.code,
+                            "name": v.name,
+                            "school": v.school,
+                            "passes": v.passes,
+                            "rating_0_100": v.rating_0_100,
+                            "checks": [
+                                {"name": c.name, "passes": c.passes, "note": c.note}
+                                for c in v.checks
+                            ],
+                        }
+                        for v in pick.verdicts
+                    ],
+                    "computed_at": datetime.now(tz=UTC).isoformat(),
+                }
+            )
+            try:
+                self._redis.call(
+                    "SET",
+                    f"{VERDICT_KEY_PREFIX}{pick.symbol}",
+                    payload,
+                    "EX",
+                    str(self._ttl_seconds),
+                )
+            except RuntimeError as exc:
+                logger.warning("verdict cache write failed for %s: %s", pick.symbol, exc)
 
     def read(self) -> CachedPicks | None:
         if self._redis is None:

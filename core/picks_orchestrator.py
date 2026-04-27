@@ -151,10 +151,11 @@ def compute_picks(
             snapshot = screener_cache.get_or_fetch(sym)
             fundamentals.append(enrich_fundamentals_with_snapshot(with_rs, snapshot))
 
+    strategies = all_strategies()
     picks = daily_picks(
         fundamentals,
         regime,
-        all_strategies(),
+        strategies,
         top_n=top_n if top_n is not None else int(os.getenv("DAILY_PICKS_TOP_N", "5")),
         min_composite=(
             min_composite
@@ -165,5 +166,19 @@ def compute_picks(
     logger.info("picks computed: %d", len(picks))
 
     if write_cache and redis is not None:
-        PicksCache(redis=redis).write(picks)
+        cache = PicksCache(redis=redis)
+        cache.write(picks)
+        # Per-symbol verdicts power the worker `/why SYMBOL` command. We
+        # write a verdict for EVERY scored symbol regardless of composite —
+        # users want to see why a stock failed, not only why it passed.
+        all_evaluated = daily_picks(
+            fundamentals,
+            regime,
+            strategies,
+            top_n=10**9,
+            min_composite=0.0,
+            block_in_downtrend=False,
+        )
+        cache.write_per_symbol_verdicts(all_evaluated)
+        logger.info("verdict cache written for %d symbols", len(all_evaluated))
     return picks
