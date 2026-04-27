@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -33,8 +34,19 @@ from bot.handlers.portfolio_commands import PortfolioCommands, parse_command
 from bot.observability import capture_exception, init_logfire, init_sentry
 from bot.redis_store import RATE_LIMIT_TTL_SECONDS, RedisConfig, RedisStore
 from bot.streaming import TelegramStream
+from core.canslim import StockFundamentals, classify_phase
 from core.config import load_config
-from core.portfolio import PortfolioStore
+from core.daily_picks import composite_rating
+from core.data.screener_cache import ScreenerCache
+from core.data.screener_in import enrich_fundamentals_with_snapshot, fetch_snapshot
+from core.fundamentals import enrich_with_earnings, fundamentals_from_history
+from core.nse_data import fetch_history, fetch_nifty
+from core.picks_cache import PicksCache
+from core.portfolio import Holding, PortfolioStore
+from core.screener import detect_market_regime
+from core.sell_signals import SellSignal, evaluate_holding
+from core.strategies.canslim_strategy import CanslimStrategy
+from core.strategies.schloss import SchlossStrategy
 from core.telegram_client import TelegramClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -235,6 +247,74 @@ def _handle_one(
         )
 
 
+def _make_why_evaluator(
+    strategies: list, screener_cache: ScreenerCache
+) -> Callable[[str], dict | None]:
+    """Return a callable that scores a single symbol live.
+
+    Live fetch ≈ 5s per symbol. Acceptable for an on-demand command;
+    the cached `/picks` command serves the heavy daily run instead.
+    """
+
+    def evaluator(symbol: str) -> dict | None:
+        nifty = fetch_nifty()
+        if nifty is None:
+            return None
+        regime = detect_market_regime(nifty)
+        history = fetch_history(symbol, period="1y")
+        if history is None:
+            return None
+        base = fundamentals_from_history(symbol, history)
+        with_earnings = enrich_with_earnings(base)
+        snapshot = screener_cache.get_or_fetch(symbol)
+        enriched = enrich_fundamentals_with_snapshot(with_earnings, snapshot)
+        verdicts = [s.evaluate(enriched, regime) for s in strategies]
+        # Re-classify regime phase deterministically — defensive against an
+        # incomplete regime instance from older paths.
+        _ = classify_phase  # type-check + keep import live
+        return {
+            "symbol": symbol,
+            "composite_rating": composite_rating(verdicts),
+            "fundamentals_summary": _fundamentals_summary(enriched),
+            "verdicts": verdicts,
+        }
+
+    return evaluator
+
+
+def _make_sells_evaluator() -> Callable[[Holding], SellSignal | None]:
+    def evaluator(holding: Holding) -> SellSignal | None:
+        history = fetch_history(holding.symbol, period="6mo")
+        if history is None:
+            return None
+        closes = history.history["Close"].dropna()
+        if closes.empty:
+            return None
+        current_close = float(closes.iloc[-1])
+        return evaluate_holding(
+            holding,
+            current_close=current_close,
+            history=history.history,
+        )
+
+    return evaluator
+
+
+def _fundamentals_summary(f: StockFundamentals) -> str:
+    parts: list[str] = []
+    if f.last_close is not None:
+        parts.append(f"px=₹{f.last_close:.2f}")
+    if f.rs_rating is not None:
+        parts.append(f"RS={f.rs_rating:.0f}")
+    if f.pe_ratio is not None:
+        parts.append(f"P/E={f.pe_ratio:.1f}")
+    if f.pb_ratio is not None:
+        parts.append(f"P/B={f.pb_ratio:.2f}")
+    if f.debt_to_equity is not None:
+        parts.append(f"D/E={f.debt_to_equity:.2f}")
+    return " · ".join(parts)
+
+
 def main() -> int:
     init_sentry()
     init_logfire()
@@ -265,7 +345,22 @@ def main() -> int:
     telegram = TelegramClient(config.telegram.bot_token, config.telegram.chat_id)
     owner_user_id = os.getenv("TELEGRAM_OWNER_USER_ID")
     portfolio_store = PortfolioStore(redis=store)
-    commands = PortfolioCommands(store=portfolio_store)
+    picks_cache = PicksCache(redis=store)
+
+    # Reusable HTTP client for screener.in (kept for the run; closed when the
+    # process exits — chatbot-poll is short-lived per cron tick).
+    screener_http = httpx.Client(timeout=10.0)
+    screener_cache = ScreenerCache(
+        redis=store, fetcher=lambda sym: fetch_snapshot(sym, http_client=screener_http)
+    )
+    strategies = [CanslimStrategy(), SchlossStrategy()]
+
+    commands = PortfolioCommands(
+        store=portfolio_store,
+        picks_cache_reader=picks_cache.read,
+        why_evaluator=_make_why_evaluator(strategies, screener_cache),
+        sells_evaluator=_make_sells_evaluator(),
+    )
 
     last_update_id = offset
     for update in updates:

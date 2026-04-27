@@ -227,3 +227,135 @@ def test_clear_with_confirm_flag_wipes_portfolio():
     out = cmds.handle(chat_id=1, command="clear", args=["CONFIRM"])
     assert "cleared" in out.reply_text.lower()
     assert store.get(chat_id=1).holdings == []
+
+
+# -----------------------------------------------------------------------------
+# /picks
+# -----------------------------------------------------------------------------
+
+
+def test_picks_returns_empty_message_when_cache_missing():
+    cmds = PortfolioCommands(store=_FakeStore(), picks_cache_reader=lambda: None)
+    out = cmds.handle(chat_id=1, command="picks", args=[])
+    assert "no picks" in out.reply_text.lower() or "not yet computed" in out.reply_text.lower()
+
+
+def test_picks_returns_top_n_with_summaries():
+    from datetime import UTC, datetime
+
+    from core.picks_cache import CachedPicks
+
+    cached = CachedPicks(
+        picks=[
+            {
+                "symbol": "RELIANCE.NS",
+                "composite_rating": 91.0,
+                "endorsement_count": 2,
+                "endorsing_codes": ["canslim", "schloss"],
+                "fundamentals_summary": "px=₹2520 · RS=84",
+            },
+            {
+                "symbol": "TCS.NS",
+                "composite_rating": 78.0,
+                "endorsement_count": 1,
+                "endorsing_codes": ["canslim"],
+                "fundamentals_summary": "px=₹3500 · RS=72",
+            },
+        ],
+        computed_at=datetime.now(tz=UTC),
+    )
+    cmds = PortfolioCommands(store=_FakeStore(), picks_cache_reader=lambda: cached)
+    out = cmds.handle(chat_id=1, command="picks", args=[])
+    assert "RELIANCE" in out.reply_text
+    assert "TCS" in out.reply_text
+    assert "91" in out.reply_text
+
+
+# -----------------------------------------------------------------------------
+# /why
+# -----------------------------------------------------------------------------
+
+
+def test_why_returns_per_strategy_breakdown():
+    from core.strategies.base import FilterCheck, StrategyVerdict
+
+    def evaluator(symbol: str):
+        if symbol != "RELIANCE.NS":
+            return None
+        return {
+            "symbol": symbol,
+            "composite_rating": 88.0,
+            "fundamentals_summary": "px=₹2520 · RS=84",
+            "verdicts": [
+                StrategyVerdict(
+                    code="canslim",
+                    name="O'Neil",
+                    school="growth",
+                    passes=True,
+                    rating_0_100=88.0,
+                    checks=[FilterCheck(name="C", passes=True, note="+34%")],
+                    notes={},
+                ),
+                StrategyVerdict(
+                    code="schloss",
+                    name="Schloss",
+                    school="deep_value",
+                    passes=False,
+                    rating_0_100=20.0,
+                    checks=[FilterCheck(name="near_52w_low", passes=False, note="far from low")],
+                    notes={},
+                ),
+            ],
+        }
+
+    cmds = PortfolioCommands(store=_FakeStore(), why_evaluator=evaluator)
+    out = cmds.handle(chat_id=1, command="why", args=["RELIANCE"])
+    assert "RELIANCE" in out.reply_text
+    assert "O'Neil" in out.reply_text or "canslim" in out.reply_text.lower()
+    assert "schloss" in out.reply_text.lower()
+    assert "88" in out.reply_text
+
+
+def test_why_returns_friendly_when_unknown_symbol():
+    cmds = PortfolioCommands(store=_FakeStore(), why_evaluator=lambda _s: None)
+    out = cmds.handle(chat_id=1, command="why", args=["UNKNOWN"])
+    assert "couldn't" in out.reply_text.lower() or "no data" in out.reply_text.lower()
+
+
+def test_why_validates_arg_count():
+    cmds = PortfolioCommands(store=_FakeStore(), why_evaluator=lambda _s: None)
+    out = cmds.handle(chat_id=1, command="why", args=[])
+    assert "usage" in out.reply_text.lower()
+
+
+# -----------------------------------------------------------------------------
+# /sells
+# -----------------------------------------------------------------------------
+
+
+def test_sells_iterates_each_holding():
+    from core.sell_signals import SellSeverity, SellSignal
+
+    seen: list[str] = []
+
+    def evaluator(holding):
+        seen.append(holding.symbol)
+        if holding.symbol == "TATAMOTORS.NS":
+            return SellSignal(SellSeverity.SELL, "stop_loss_7pct", "−7.6% breach")
+        return SellSignal(SellSeverity.HOLD, "hold", "no rule fired")
+
+    store = _FakeStore()
+    cmds = PortfolioCommands(store=store, sells_evaluator=evaluator)
+    cmds.handle(chat_id=1, command="add", args=["RELIANCE", "50", "2400"])
+    cmds.handle(chat_id=1, command="add", args=["TATAMOTORS", "30", "820"])
+    out = cmds.handle(chat_id=1, command="sells", args=[])
+    assert seen == ["RELIANCE.NS", "TATAMOTORS.NS"]
+    assert "RELIANCE" in out.reply_text
+    assert "TATAMOTORS" in out.reply_text
+    assert "SELL" in out.reply_text or "stop_loss_7pct" in out.reply_text
+
+
+def test_sells_with_empty_portfolio_returns_friendly_empty():
+    cmds = PortfolioCommands(store=_FakeStore(), sells_evaluator=lambda _h: None)
+    out = cmds.handle(chat_id=1, command="sells", args=[])
+    assert "no holdings" in out.reply_text.lower() or "empty" in out.reply_text.lower()
