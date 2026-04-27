@@ -175,6 +175,49 @@ export interface CachedPicks {
 }
 
 export const PICKS_CACHE_KEY = "picks:latest";
+export const VERDICT_KEY_PREFIX = "picks:verdicts:";
+
+export interface VerdictCheck {
+  name: string;
+  passes: boolean;
+  note: string;
+}
+
+export interface CachedVerdict {
+  code: string;
+  name: string;
+  school: string;
+  passes: boolean;
+  rating_0_100: number;
+  checks: VerdictCheck[];
+}
+
+export interface CachedSymbolVerdicts {
+  symbol: string;
+  composite_rating: number;
+  endorsement_count: number;
+  endorsing_codes: string[];
+  fundamentals_summary?: string;
+  verdicts: CachedVerdict[];
+  computed_at: string;
+}
+
+/** Read per-symbol verdicts written by the Python morning cron. */
+export async function readSymbolVerdicts(
+  redis: RedisStore,
+  symbol: string,
+): Promise<CachedSymbolVerdicts | null> {
+  const raw = await redis.command("GET", `${VERDICT_KEY_PREFIX}${symbol}`);
+  if (typeof raw !== "string") return null;
+  try {
+    const data = JSON.parse(raw) as Partial<CachedSymbolVerdicts>;
+    if (!Array.isArray(data.verdicts) || typeof data.symbol !== "string") return null;
+    return data as CachedSymbolVerdicts;
+  } catch (exc) {
+    console.warn("verdict cache corrupt JSON for", symbol, (exc as Error).message);
+    return null;
+  }
+}
 
 export async function readPicksCache(redis: RedisStore): Promise<CachedPicks | null> {
   const raw = await redis.command("GET", PICKS_CACHE_KEY);

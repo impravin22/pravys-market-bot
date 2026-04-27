@@ -17,8 +17,11 @@ import {
   investedCapital,
   makeHolding,
   readPicksCache,
+  readSymbolVerdicts,
 } from "./portfolio";
 import { RedisStore } from "./redis_store";
+import { evaluateHolding, SellSeverity, SellSignal } from "./sell_rules";
+import { fetchHistory, latestClose } from "./yahoo";
 
 export interface CommandResult {
   replyText: string;
@@ -38,7 +41,9 @@ const HELP_TEXT = [
   "  /portfolio — list your holdings",
   "  /add SYMBOL QTY PRICE [YYYY-MM-DD] — add a holding",
   "  /remove SYMBOL — remove a holding",
+  "  /sells — check sell rules on every holding (live)",
   "  /picks — show today's top buy candidates (cached)",
+  "  /why SYMBOL — guru breakdown for one ticker (cached)",
   "  /clear CONFIRM — wipe portfolio (requires the word CONFIRM)",
   "  /help — this message",
 ].join("\n");
@@ -65,6 +70,10 @@ export class PortfolioCommands {
         return this.cmdClear(chatId, args);
       case "picks":
         return this.cmdPicks();
+      case "why":
+        return this.cmdWhy(args);
+      case "sells":
+        return this.cmdSells(chatId);
       default:
         return { replyText: "", shouldSkipAgent: false };
     }
@@ -204,11 +213,99 @@ export class PortfolioCommands {
     }
     return { replyText: lines.join("\n"), shouldSkipAgent: true };
   }
+
+  // -------------------- /why --------------------
+
+  private async cmdWhy(args: string[]): Promise<CommandResult> {
+    if (args.length !== 1) {
+      return {
+        replyText: "Usage: /why SYMBOL\nExample: /why RELIANCE",
+        shouldSkipAgent: true,
+      };
+    }
+    const symbol = normaliseSymbol(args[0]);
+    const cached = await readSymbolVerdicts(this.redis, symbol);
+    if (!cached) {
+      return {
+        replyText:
+          `No cached verdicts for ${symbol}. Either it's not in today's universe ` +
+          "or the morning cron hasn't run yet — try a Nifty 50 ticker like RELIANCE / TCS / INFY.",
+        shouldSkipAgent: true,
+      };
+    }
+    const lines = [`${symbol} — composite ${cached.composite_rating.toFixed(0)}/99`];
+    if (cached.fundamentals_summary) lines.push(cached.fundamentals_summary);
+    lines.push("");
+    for (const v of cached.verdicts) {
+      const mark = v.passes ? "✅" : "❌";
+      lines.push(`${mark} ${v.name} (${v.code}) — ${v.rating_0_100.toFixed(0)}/100`);
+      for (const c of v.checks) {
+        const tick = c.passes ? "•" : "·";
+        lines.push(`   ${tick} ${c.name}: ${c.note}`);
+      }
+    }
+    return { replyText: lines.join("\n"), shouldSkipAgent: true };
+  }
+
+  // -------------------- /sells --------------------
+
+  private async cmdSells(chatId: number): Promise<CommandResult> {
+    const portfolio = await this.store.get(chatId);
+    if (portfolio.holdings.length === 0) {
+      return {
+        replyText: "No holdings to evaluate. Add one with `/add SYMBOL QTY PRICE`.",
+        shouldSkipAgent: true,
+      };
+    }
+    const lines = [`🧾 Sell-rule check on ${portfolio.holdings.length} holdings:`];
+    let actionable = 0;
+    for (const h of portfolio.holdings) {
+      const history = await fetchHistory(h.symbol, { range: "6mo" });
+      if (!history) {
+        lines.push(`• ${h.symbol} — data unavailable`);
+        continue;
+      }
+      const close = latestClose(history);
+      if (close == null) {
+        lines.push(`• ${h.symbol} — data unavailable`);
+        continue;
+      }
+      const signal: SellSignal = evaluateHolding({
+        holding: h,
+        currentClose: close,
+        bars: history.bars,
+      });
+      if (signal.severity !== "hold") actionable += 1;
+      const badge = severityBadge(signal.severity);
+      lines.push(
+        `${badge} ${h.symbol} — ${signal.severity.toUpperCase()} (${signal.rule}): ${signal.reason}`,
+      );
+    }
+    if (actionable === 0) {
+      lines.push("");
+      lines.push("All clear — no action required tonight.");
+    }
+    return { replyText: lines.join("\n"), shouldSkipAgent: true };
+  }
 }
 
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
+
+function severityBadge(severity: SellSeverity): string {
+  switch (severity) {
+    case "sell":
+      return "🚨";
+    case "trim":
+      return "⚠️";
+    case "watch":
+      return "👁";
+    case "hold":
+    default:
+      return "✅";
+  }
+}
 
 export function normaliseSymbol(raw: string): string {
   const upper = raw.trim().toUpperCase();
