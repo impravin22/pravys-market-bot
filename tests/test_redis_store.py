@@ -274,3 +274,19 @@ def test_chat_history_key_is_hashed_to_avoid_raw_user_id_in_dms(config):
     assert sent_key.startswith("chat_history:")
     # Raw user_id must not appear in the key.
     assert "8200970431" not in sent_key
+
+
+def test_public_call_method_runs_arbitrary_command(config):
+    """Layered stores rely on RedisStore.call(...) instead of poking _call."""
+    http = _http_mock([_response("OK")])
+    store = RedisStore(config, http_client=http)
+    result = store.call("SET", "k", "v")
+    assert result == "OK"
+    sent = http.post.call_args.kwargs["json"]
+    assert sent == ["SET", "k", "v"]
+
+
+def test_user_id_salt_property_exposes_config(config):
+    """Public property — keeps PortfolioStore et al. out of `_config`."""
+    store = RedisStore(config, http_client=MagicMock())
+    assert store.user_id_salt == "pepper"

@@ -29,6 +29,21 @@ class StockFundamentals:
     # Market leadership + institutional
     rs_rating: float | None = None  # 0–100 percentile
     fii_dii_5d_net_positive: bool | None = None  # None if FII/DII data unavailable
+    # Valuation / quality ratios — optional, populated by data adapters where
+    # available (screener.in scrape, yfinance Ticker.info). All default None
+    # so existing CAN SLIM scoring is unaffected; non-CAN-SLIM strategies
+    # consume these.
+    pe_ratio: float | None = None
+    pb_ratio: float | None = None
+    ps_ratio: float | None = None
+    pcf_ratio: float | None = None
+    ev_ebitda: float | None = None
+    debt_to_equity: float | None = None
+    current_ratio: float | None = None
+    roe_5y_avg_pct: float | None = None
+    dividend_yield_pct: float | None = None
+    pays_dividend: bool | None = None
+    earnings_positive_recent: bool | None = None
 
 
 @dataclass(frozen=True)
