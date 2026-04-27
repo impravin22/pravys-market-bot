@@ -1,0 +1,28 @@
+name: Weekly Portfolio Prompt
+
+# Triggered by the Cloudflare Worker's scheduled() handler. Suggested fire
+# time: Sunday 13:30 UTC (21:30 TPE / 19:00 IST) — late enough that the
+# user has finished any weekend research, early enough to act on Monday.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  prompt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - name: Send weekly portfolio prompt
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          FORCE_RUN: "false"
+        run: uv run python -m jobs.weekly_portfolio_prompt
