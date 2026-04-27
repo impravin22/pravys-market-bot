@@ -29,10 +29,12 @@ from pathlib import Path
 import httpx
 
 from bot.agent import HermesAgent
+from bot.handlers.portfolio_commands import PortfolioCommands, parse_command
 from bot.observability import capture_exception, init_logfire, init_sentry
 from bot.redis_store import RATE_LIMIT_TTL_SECONDS, RedisConfig, RedisStore
 from bot.streaming import TelegramStream
 from core.config import load_config
+from core.portfolio import PortfolioStore
 from core.telegram_client import TelegramClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -127,6 +129,7 @@ def _handle_one(
     owner_user_id: str | None,
     bot_username: str | None,
     store: RedisStore,
+    commands: PortfolioCommands | None = None,
 ) -> None:
     message = update.get("message") or {}
     chat = message.get("chat") or {}
@@ -151,6 +154,22 @@ def _handle_one(
             f"Keep messages under {MAX_INPUT_CHARS} characters, please — try a shorter question.",
         )
         return
+
+    # Try portfolio commands first — short-circuits before rate-limit + Gemini.
+    if commands is not None:
+        parsed = parse_command(text)
+        if parsed is not None:
+            cmd, args = parsed
+            result = commands.handle(chat_id=int(chat_id), command=cmd, args=args)
+            if result.should_skip_agent:
+                _send_plain(telegram, chat_id, result.reply_text)
+                logger.info(
+                    "command-handled chat_id=%s cmd=%s args=%d",
+                    chat_id,
+                    cmd,
+                    len(args),
+                )
+                return
 
     if store.is_rate_limited(user_id, seconds=RATE_LIMIT_TTL_SECONDS):
         logger.info("rate-limiting user_id=(hashed)")
@@ -245,6 +264,8 @@ def main() -> int:
     )
     telegram = TelegramClient(config.telegram.bot_token, config.telegram.chat_id)
     owner_user_id = os.getenv("TELEGRAM_OWNER_USER_ID")
+    portfolio_store = PortfolioStore(redis=store)
+    commands = PortfolioCommands(store=portfolio_store)
 
     last_update_id = offset
     for update in updates:
@@ -260,6 +281,7 @@ def main() -> int:
                 owner_user_id=owner_user_id,
                 bot_username=bot_username,
                 store=store,
+                commands=commands,
             )
         except Exception as exc:  # noqa: BLE001 — never let one bad message kill the batch
             logger.exception("handler failed for update_id=%s: %s", update_id, exc)
