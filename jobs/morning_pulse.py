@@ -8,9 +8,11 @@ import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from bot.redis_store import RedisConfig, RedisStore
 from core.canslim import CanslimScore
 from core.config import load_config
 from core.digest_builder import IndexSnapshot, build_morning_pulse
+from core.digest_extras import format_picks_section
 from core.gemini_client import GeminiClient
 from core.nse_data import (
     BANK_NIFTY_TICKER,
@@ -23,6 +25,7 @@ from core.nse_data import (
     nse_holidays,
     today_in_market,
 )
+from core.picks_orchestrator import compute_picks
 from core.screener import run_screener
 from core.telegram_client import TelegramClient
 
@@ -113,6 +116,27 @@ def main() -> int:
         len(result.scored),
         result.elapsed_seconds,
     )
+
+    # Daily picks panel — runs the full 7-guru screen, writes to picks cache,
+    # and sends a separate message so the existing morning pulse stays
+    # untouched. Failure here must NOT break the pulse delivery above.
+    redis_config = RedisConfig.from_env()
+    if redis_config is None:
+        logger.warning("Redis creds missing — skipping daily picks section")
+        return 0
+    redis = RedisStore(redis_config)
+    try:
+        picks = compute_picks(redis=redis)
+    except Exception as exc:  # noqa: BLE001 — never let picks crash morning pulse
+        logger.warning("daily picks computation failed: %s", exc)
+        return 0
+
+    picks_text = format_picks_section(picks)
+    try:
+        tg.send_message(picks_text)
+        logger.info("morning-picks-sent | picks=%d", len(picks))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("morning picks send failed: %s", exc)
     return 0
 
 

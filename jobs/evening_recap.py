@@ -7,8 +7,10 @@ import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from bot.redis_store import RedisConfig, RedisStore
 from core.config import load_config
 from core.digest_builder import DailyMover, IndexSnapshot, build_evening_recap
+from core.digest_extras import format_sells_section
 from core.gemini_client import GeminiClient
 from core.nse_data import (
     BANK_NIFTY_TICKER,
@@ -21,6 +23,8 @@ from core.nse_data import (
     nse_holidays,
     today_in_market,
 )
+from core.portfolio import Holding, PortfolioStore
+from core.sell_signals import SellSignal, evaluate_holding
 from core.telegram_client import TelegramClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -128,7 +132,51 @@ def main() -> int:
         len(losers),
         len(commodities),
     )
+
+    # Sell-rule check on the owner's portfolio. Send as a separate message;
+    # any failure here must NOT break the recap delivery above.
+    _send_sells_section(tg, config.telegram.chat_id)
     return 0
+
+
+def _send_sells_section(tg: TelegramClient, chat_id: str) -> None:
+    redis_config = RedisConfig.from_env()
+    if redis_config is None:
+        logger.warning("Redis creds missing — skipping sell-rule check")
+        return
+    try:
+        chat_id_int = int(chat_id)
+    except (TypeError, ValueError):
+        logger.warning("config.telegram.chat_id not numeric — skipping sell-rule check")
+        return
+
+    redis = RedisStore(redis_config)
+    portfolio = PortfolioStore(redis=redis).get(chat_id=chat_id_int)
+    if not portfolio.holdings:
+        logger.info("no holdings for chat_id=%s — skipping sell-rule message", chat_id_int)
+        return
+
+    text = format_sells_section(holdings=portfolio.holdings, evaluator=_sells_evaluator)
+    try:
+        tg.send_message(text)
+        logger.info("evening-sells-sent | holdings=%d", len(portfolio.holdings))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("evening sells send failed: %s", exc)
+
+
+def _sells_evaluator(holding: Holding) -> SellSignal | None:
+    history = fetch_history(holding.symbol, period="6mo")
+    if history is None:
+        return None
+    closes = history.history["Close"].dropna()
+    if closes.empty:
+        return None
+    current_close = float(closes.iloc[-1])
+    return evaluate_holding(
+        holding,
+        current_close=current_close,
+        history=history.history,
+    )
 
 
 if __name__ == "__main__":
