@@ -265,6 +265,69 @@ def test_handle_one_ignores_missing_text(monkeypatch):
     agent.stream_reply.assert_not_called()
 
 
+def test_handle_one_dispatches_portfolio_command_and_skips_agent(monkeypatch):
+    """`/portfolio` short-circuits before rate-limit and never calls Gemini."""
+    _attach_fake_stream(monkeypatch)
+    agent = _fake_agent(["should not run"])
+    store = _FakeStore()
+
+    captured: list[tuple[int | str, str]] = []
+
+    def fake_send_plain(_telegram, chat_id, text):
+        captured.append((chat_id, text))
+
+    monkeypatch.setattr("jobs.chatbot_poll._send_plain", fake_send_plain)
+
+    class _StubCommands:
+        def handle(self, *, chat_id, command, args):
+            from bot.handlers.portfolio_commands import CommandResult
+
+            assert command == "portfolio"
+            assert args == []
+            return CommandResult("No holdings yet.", should_skip_agent=True)
+
+    _handle_one(
+        _make_update("/portfolio"),
+        agent=agent,
+        telegram=_fake_telegram(),
+        owner_chat_id="-100500",
+        owner_user_id=None,
+        bot_username="pravys_market_bot",
+        store=store,
+        commands=_StubCommands(),
+    )
+
+    agent.stream_reply.assert_not_called()
+    assert store.marks == []  # no rate-limit mark when commands short-circuit
+    assert captured == [(-100500, "No holdings yet.")]
+
+
+def test_handle_one_unrecognised_command_falls_through_to_agent(monkeypatch):
+    """`/foo` is not a portfolio command — should still hit Gemini."""
+    _attach_fake_stream(monkeypatch)
+    agent = _fake_agent(["agent reply"])
+    store = _FakeStore()
+
+    class _StubCommands:
+        def handle(self, *, chat_id, command, args):
+            from bot.handlers.portfolio_commands import CommandResult
+
+            return CommandResult("", should_skip_agent=False)
+
+    _handle_one(
+        _make_update("/foo"),
+        agent=agent,
+        telegram=_fake_telegram(),
+        owner_chat_id="-100500",
+        owner_user_id=None,
+        bot_username="pravys_market_bot",
+        store=store,
+        commands=_StubCommands(),
+    )
+
+    agent.stream_reply.assert_called_once()
+
+
 def test_handle_one_rejects_long_input(monkeypatch):
     _attach_fake_stream(monkeypatch)
     sent_direct: list[tuple] = []
