@@ -26,6 +26,8 @@
 
 import { HermesAgent } from "./agent";
 import { dispatchWorkflow } from "./github";
+import { PortfolioStore } from "./portfolio";
+import { PortfolioCommands, parseCommand } from "./portfolio_commands";
 import { RedisStore } from "./redis_store";
 import { TelegramStream } from "./streaming";
 import type { TelegramMessage, TelegramUpdate } from "./telegram";
@@ -147,6 +149,25 @@ async function handleUpdate(update: TelegramUpdate, env: Env): Promise<void> {
     token: env.UPSTASH_REDIS_REST_TOKEN,
     userIdSalt: env.BOT_USER_ID_SALT,
   });
+
+  // Slash-command dispatch — short-circuits before rate-limit + Gemini.
+  // Recognised commands (e.g. /portfolio, /add, /picks) reply directly via
+  // Telegram and skip the agent. Unknown commands fall through to Gemini.
+  const parsed = parseCommand(text);
+  if (parsed) {
+    const portfolioStore = new PortfolioStore(store);
+    const commands = new PortfolioCommands(portfolioStore, store);
+    const result = await commands.handle(Number(chatId), parsed.command, parsed.args);
+    if (result.shouldSkipAgent) {
+      try {
+        await telegram.sendMessage(chatId, result.replyText);
+        console.info("command-handled chat_id=", chatId, "cmd=", parsed.command);
+      } catch (exc) {
+        console.error("command reply send failed:", (exc as Error).message);
+      }
+      return;
+    }
+  }
 
   if (await store.isRateLimited(userId, RATE_LIMIT_SECONDS)) {
     console.info("rate-limiting user_id=(hashed)");

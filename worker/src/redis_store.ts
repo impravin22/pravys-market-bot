@@ -62,6 +62,24 @@ export class RedisStore {
     this.fetchImpl = (input, init) => impl(input, init);
   }
 
+  /**
+   * Public command runner used by layered stores (e.g. PortfolioStore).
+   * Same semantics as the private `call` underneath.
+   */
+  async command(...args: string[]): Promise<unknown> {
+    return this.call(...args);
+  }
+
+  /** Public read-only access to the per-deployment hashing salt. */
+  get userIdSalt(): string {
+    return this.config.userIdSalt;
+  }
+
+  /** Hash a chat_id / user_id with the deployment salt. Used by layered stores. */
+  async hashId(id: string | number): Promise<string> {
+    return hashUserId(id, this.config.userIdSalt);
+  }
+
   private async call(...args: string[]): Promise<unknown> {
     let resp: Response;
     try {
